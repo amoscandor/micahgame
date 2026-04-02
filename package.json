@@ -1,0 +1,21 @@
+{
+  "name": "fighting-wars",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.100.1",
+    "@types/three": "^0.183.1",
+    "phaser": "^3.90.0",
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.4.1",
+    "vite-plugin-pwa": "^0.21.2"
+  }
+}
