@@ -132,11 +132,20 @@ export class ModeSelectScene extends Phaser.Scene {
   private startGame(mode: string): void {
     this.cameras.main.fadeOut(400, 0, 0, 0);
     this.time.delayedCall(400, () => {
-      this.scene.start('BattleScene', {
-        ...this.charData,
-        mode,
-        opponent: this.selectedOpponent,
-      });
+      if (this.selectedOpponent === 'players') {
+        // Go to lobby for multiplayer matchmaking
+        this.scene.start('LobbyScene', {
+          ...this.charData,
+          mode,
+          action: 'create',
+        });
+      } else {
+        this.scene.start('BattleScene', {
+          ...this.charData,
+          mode,
+          opponent: this.selectedOpponent,
+        });
+      }
     });
   }
 }

@@ -10,3 +10,10 @@ export function addCoins(amount: number): number {
   localStorage.setItem(COINS_KEY, total.toString());
   return total;
 }
+
+export function spendCoins(amount: number): boolean {
+  const current = getCoins();
+  if (current < amount) return false;
+  localStorage.setItem(COINS_KEY, (current - amount).toString());
+  return true;
+}

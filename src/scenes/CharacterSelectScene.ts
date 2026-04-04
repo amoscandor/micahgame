@@ -101,27 +101,51 @@ export class CharacterSelectScene extends Phaser.Scene {
         });
     }
 
-    // "MAKE YOUR OWN" button below grid
-    const makeX = 170;
+    // "MAKE YOUR OWN" button below grid (shifted left)
+    const makeX = 95;
     const makeY = 330;
     const makeBg = this.add.graphics();
     makeBg.fillStyle(0x000000, 0.3);
-    makeBg.fillRoundedRect(makeX - 72, makeY - 11, 144, 24, 6);
+    makeBg.fillRoundedRect(makeX - 62, makeY - 11, 124, 24, 6);
     makeBg.fillStyle(0x44aaff);
-    makeBg.fillRoundedRect(makeX - 70, makeY - 12, 140, 22, 5);
+    makeBg.fillRoundedRect(makeX - 60, makeY - 12, 120, 22, 5);
     makeBg.fillStyle(0x66ccff, 0.4);
-    makeBg.fillRoundedRect(makeX - 66, makeY - 10, 132, 10, 3);
+    makeBg.fillRoundedRect(makeX - 56, makeY - 10, 112, 10, 3);
     this.add.text(makeX, makeY - 1, '+ MAKE YOUR OWN', {
-      fontSize: '11px',
+      fontSize: '10px',
       fontFamily: 'Arial Black, sans-serif',
       color: '#000000',
     }).setOrigin(0.5);
-    this.add.rectangle(makeX, makeY, 150, 28, 0x000000, 0)
+    this.add.rectangle(makeX, makeY, 130, 28, 0x000000, 0)
       .setInteractive({ useHandCursor: true }).setDepth(100)
       .on('pointerdown', () => {
         this.cameras.main.fadeOut(300, 0, 0, 0);
         this.time.delayedCall(300, () => {
           this.scene.start('CharacterCreatorScene');
+        });
+      });
+
+    // "BUY CHARACTER" button (right of MAKE YOUR OWN)
+    const shopX = 245;
+    const shopY = 330;
+    const shopBg = this.add.graphics();
+    shopBg.fillStyle(0x000000, 0.3);
+    shopBg.fillRoundedRect(shopX - 62, shopY - 11, 124, 24, 6);
+    shopBg.fillStyle(0xffaa00);
+    shopBg.fillRoundedRect(shopX - 60, shopY - 12, 120, 22, 5);
+    shopBg.fillStyle(0xffcc44, 0.4);
+    shopBg.fillRoundedRect(shopX - 56, shopY - 10, 112, 10, 3);
+    this.add.text(shopX, shopY - 1, 'BUY CHARACTER', {
+      fontSize: '10px',
+      fontFamily: 'Arial Black, sans-serif',
+      color: '#000000',
+    }).setOrigin(0.5);
+    this.add.rectangle(shopX, shopY, 130, 28, 0x000000, 0)
+      .setInteractive({ useHandCursor: true }).setDepth(100)
+      .on('pointerdown', () => {
+        this.cameras.main.fadeOut(300, 0, 0, 0);
+        this.time.delayedCall(300, () => {
+          this.scene.start('CharacterShopScene');
         });
       });
 
