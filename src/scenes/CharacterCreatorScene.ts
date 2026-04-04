@@ -238,60 +238,6 @@ export class CharacterCreatorScene extends Phaser.Scene {
     const swatchGap = 22;
     rowY = this.addHatRow(labelX, swatchStartX, rowY, swatchGap);
 
-    // --- SHIRT LOGO ---
-    rowY += 4;
-    this.add.text(labelX, rowY, 'LOGO', {
-      fontSize: '9px', fontFamily: 'Arial Black, sans-serif', color: '#aaaaaa',
-    }).setDepth(20);
-
-    const logoOptions = ['NONE', 'NIKE', 'ADEDAS', 'POMA', 'REBOK', 'FILA', 'GUCI', 'ZARA', 'GAP', 'CHAMP', '📷'];
-    const logoGap = 90;
-    const logoStartX = barStartX;
-    const logoY = rowY;
-    const btnW = 80;
-    const btnH = 32;
-
-    for (let li = 0; li < logoOptions.length; li++) {
-      const lx = logoStartX + (li % 4) * logoGap;
-      const ly = logoY + Math.floor(li / 4) * 38;
-      const brand = logoOptions[li];
-      const isUpload = brand === '📷';
-      const isNone = brand === 'NONE';
-
-      const bg = this.add.graphics().setDepth(20);
-      bg.fillStyle(isUpload ? 0x4488ff : isNone ? 0x444444 : 0xffffff, 0.9);
-      bg.fillRoundedRect(lx, ly - 14, btnW, btnH, 6);
-      if (!isNone && !isUpload) {
-        this.add.text(lx + btnW / 2, ly + 2, brand, {
-          fontSize: '14px', fontFamily: 'Arial Black, sans-serif', color: '#000000',
-        }).setOrigin(0.5).setDepth(21);
-      } else {
-        this.add.text(lx + btnW / 2, ly + 2, isUpload ? 'UPLOAD' : 'NONE', {
-          fontSize: '14px', fontFamily: 'Arial Black, sans-serif', color: '#ffffff',
-        }).setOrigin(0.5).setDepth(21);
-      }
-
-      if (isUpload) {
-        this.createFileInputOverlay(lx, ly - 14, btnW, btnH);
-      }
-
-      this.add.rectangle(lx + btnW / 2, ly + 2, btnW, btnH, 0x000000, 0)
-        .setDepth(22)
-        .setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => {
-          if (isUpload) {
-            // handled by HTML overlay
-          } else if (isNone) {
-            this.selectedBrand = null;
-            this.clearShirtLabel();
-            this.updateBrandOnPreview();
-          } else {
-            this.selectedBrand = brand;
-            this.clearShirtLabel();
-            this.updateBrandOnPreview();
-          }
-        });
-    }
 
     this.cameras.main.fadeIn(400, 0, 0, 0);
   }
@@ -1054,7 +1000,6 @@ export class CharacterCreatorScene extends Phaser.Scene {
     saved.push(customSave);
     localStorage.setItem('customCharacters', JSON.stringify(saved));
 
-    // Clean up and go back
     this.removeNameInput();
     this.scene.start('CharacterSelectScene');
   }

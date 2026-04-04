@@ -68,6 +68,48 @@ export interface GameOverMessage {
   won: boolean;
 }
 
+// ── Real-time multiplayer messages ──
+
+export interface PositionUpdateMessage {
+  type: 'POSITION_UPDATE';
+  playerId: string;
+  x: number;
+  y: number;
+  z: number;
+  rotY: number;
+  speed: number;
+  hp: number;
+  gun: string;
+}
+
+export interface ShootMessage {
+  type: 'SHOOT';
+  playerId: string;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  damage: number;
+}
+
+export interface PlayerHitMessage {
+  type: 'PLAYER_HIT';
+  targetId: string;
+  damage: number;
+}
+
+export interface PlayerDeadMessage {
+  type: 'PLAYER_DEAD';
+  playerId: string;
+}
+
+export interface PlayerLeftMessage {
+  type: 'PLAYER_LEFT';
+  playerId: string;
+}
+
 export type GameMessage =
   | JoinMessage
   | PlayerListMessage
@@ -77,4 +119,9 @@ export type GameMessage =
   | PlayerDiedMessage
   | BossPhaseMessage
   | BossHitMessage
-  | GameOverMessage;
+  | GameOverMessage
+  | PositionUpdateMessage
+  | ShootMessage
+  | PlayerHitMessage
+  | PlayerDeadMessage
+  | PlayerLeftMessage;

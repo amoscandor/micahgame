@@ -1,6 +1,9 @@
 import Phaser from 'phaser';
 import * as THREE from 'three';
 import { WEAPONS } from '../config/game.config';
+import { NetworkManager } from '../network/NetworkManager';
+import { GameMessage, PlayerInfo } from '../network/MessageTypes';
+import { addCoins, getCoins } from '../utils/coinStore';
 
 // 3D character colors — matches character select
 const CHAR_COLORS = [
@@ -53,6 +56,7 @@ export class BattleScene extends Phaser.Scene {
   private playerPhase = 0;
   private playerSpeed = 0;
   private playerHP = 100;
+  private coinsEarned = 0;
   private carBtn: HTMLDivElement | null = null;
   private playerGun = 'None';
   private playerHealthBar!: THREE.Sprite;
@@ -110,7 +114,7 @@ export class BattleScene extends Phaser.Scene {
   }[] = [];
 
   // Cars
-  private cars: { mesh: THREE.Group; vx: number; vz: number; speed: number; driver: 'none' | 'player' | number }[] = [];
+  private cars: { mesh: THREE.Group; vx: number; vz: number; speed: number; driver: 'none' | 'player' | number; legPivots?: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[]; armPivots?: THREE.Group[]; tailPivots?: THREE.Group[]; jawPivot?: THREE.Group; neckBase?: THREE.Group; neckMid?: THREE.Group; bodyGroup?: THREE.Group; runPhase?: number }[] = [];
   private playerInCar: number = -1; // index of car player is driving, -1 = on foot
 
 
@@ -140,16 +144,44 @@ export class BattleScene extends Phaser.Scene {
   private selectedCharKey = 'char-0';
   private selectedCharName = 'Jake';
 
+  // ── Multiplayer ──
+  private isMultiplayer = false;
+  private network!: NetworkManager;
+  private multiplayerPlayers: PlayerInfo[] = [];
+  private remotePlayers: Map<string, {
+    model: THREE.Group;
+    targetX: number; targetY: number; targetZ: number;
+    targetRotY: number;
+    speed: number;
+    hp: number;
+    dead: boolean;
+    healthBar: THREE.Sprite;
+    healthCtx: CanvasRenderingContext2D;
+    healthTex: THREE.CanvasTexture;
+    // Skeleton joints for animation
+    hips: THREE.Group; torso: THREE.Group; head: THREE.Group;
+    leftUpperArm: THREE.Group; leftForearm: THREE.Group;
+    rightUpperArm: THREE.Group; rightForearm: THREE.Group;
+    leftThigh: THREE.Group; leftShin: THREE.Group;
+    rightThigh: THREE.Group; rightShin: THREE.Group;
+    phase: number;
+    nameSprite: THREE.Sprite;
+  }> = new Map();
+  private networkSendTimer = 0;
+  private messageHandler: ((msg: GameMessage, senderId: string) => void) | null = null;
+
   constructor() {
     super({ key: 'BattleScene' });
   }
 
   private gameMode = 'players-first';
 
-  init(data: { characterKey?: string; characterName?: string; mode?: string }): void {
+  init(data: { characterKey?: string; characterName?: string; mode?: string; opponent?: string; multiplayerPlayers?: PlayerInfo[] }): void {
     if (data.characterKey) this.selectedCharKey = data.characterKey;
     if (data.characterName) this.selectedCharName = data.characterName;
     if (data.mode) this.gameMode = data.mode;
+    this.isMultiplayer = data.opponent === 'players';
+    this.multiplayerPlayers = data.multiplayerPlayers || [];
   }
 
   create(): void {
@@ -174,6 +206,7 @@ export class BattleScene extends Phaser.Scene {
     this.bossAttackTimer = 0;
     this.bossRoarTimer = 0;
     this.bossPhase = 0;
+    this.coinsEarned = 0;
 
     // Hide Phaser canvas
     const phaserCanvas = this.game.canvas;
@@ -444,9 +477,14 @@ export class BattleScene extends Phaser.Scene {
       this.bossSpawned = true;
       this.createBearBoss();
     } else {
-      this.createNPCs(50);
+      // Fewer bots in multiplayer since real players fill slots
+      this.createNPCs(this.isMultiplayer ? 20 : 50);
     }
 
+    // === MULTIPLAYER: setup network + remote players ===
+    if (this.isMultiplayer) {
+      this.setupMultiplayer();
+    }
 
     // === PLAYER CHARACTER (third person) ===
     this.createPlayerModel();
@@ -573,11 +611,13 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
-    // Draw cars as small rectangles
-    ctx.fillStyle = '#cc3333';
+    // Draw T-Rexes as small green dots
+    ctx.fillStyle = '#4a6a2a';
     for (const car of this.cars) {
       const p = toMap(car.mesh.position.x, car.mesh.position.z);
-      ctx.fillRect(p.x - 3, p.y - 2, 6, 4);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // Draw gun pickups as tiny yellow dots
@@ -640,7 +680,7 @@ export class BattleScene extends Phaser.Scene {
       '<span style="color:#ddaa00">● Guns</span>',
       '<span style="color:#ff8800">● Pizza</span>',
       '<span style="color:#4488ff">● Bots</span>',
-      '<span style="color:#cc3333">● Cars</span>',
+      '<span style="color:#4a6a2a">● T-Rex</span>',
       '<span style="color:#4a2a0a">● Bear Boss</span>',
     ].join('');
     overlay.appendChild(legend);
@@ -697,9 +737,8 @@ export class BattleScene extends Phaser.Scene {
       // Clamp to world bounds
       const cx = Math.max(-450, Math.min(450, wx));
       const cz = Math.max(-450, Math.min(450, wz));
-      this.playerPos.set(cx, this.getTerrainHeight(cx, cz), cz);
       overlay.remove();
-      onLand();
+      this.startTRexRide(cx, cz, onLand);
     };
 
     canvas.addEventListener('click', (e) => land(e.clientX, e.clientY));
@@ -709,6 +748,732 @@ export class BattleScene extends Phaser.Scene {
         land(t.clientX, t.clientY);
       }
     });
+  }
+
+  private startTRexRide(targetX: number, targetZ: number, onLand: () => void): void {
+    // Build realistic T-Rex model
+    const trex = new THREE.Group();
+
+    // Realistic dinosaur colors — mottled brown/olive like JP T-Rex
+    const bodyDark = 0x4a3a28;
+    const bodyMid = 0x5a4a30;
+    const bodyLight = 0x6a5a3a;
+    const bellyCol = 0x8a7a58;
+    const scaleCol = 0x3a2a1a;
+    const clawCol = 0x1a1a10;
+    const teethCol = 0xeeeedd;
+    const eyeCol = 0xddcc44;
+    const pupilCol = 0x111100;
+    const tongueCol = 0x884444;
+    const gumCol = 0x663333;
+
+    // Generate procedural scaly skin texture
+    const makeSkinTex = (base: number, variation = 0.15) => {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      const cx = c.getContext('2d')!;
+      const r = (base >> 16) & 0xff, g = (base >> 8) & 0xff, b = base & 0xff;
+      // Base color
+      cx.fillStyle = `rgb(${r},${g},${b})`;
+      cx.fillRect(0, 0, 64, 64);
+      // Scale pattern — diamond shapes
+      for (let sy = 0; sy < 64; sy += 4) {
+        for (let sx = 0; sx < 64; sx += 4) {
+          const off = ((sy / 4) % 2) * 2;
+          const v = (Math.random() - 0.5) * variation;
+          const sr = Math.max(0, Math.min(255, r + r * v));
+          const sg = Math.max(0, Math.min(255, g + g * v));
+          const sb = Math.max(0, Math.min(255, b + b * v));
+          cx.fillStyle = `rgb(${sr|0},${sg|0},${sb|0})`;
+          cx.fillRect(sx + off, sy, 3, 3);
+          // Dark grid lines between scales
+          cx.fillStyle = `rgba(0,0,0,0.15)`;
+          cx.fillRect(sx + off + 3, sy, 1, 3);
+          cx.fillRect(sx + off, sy + 3, 4, 1);
+        }
+      }
+      // Random scratches/scars
+      cx.strokeStyle = 'rgba(0,0,0,0.12)';
+      cx.lineWidth = 1;
+      for (let i = 0; i < 5; i++) {
+        cx.beginPath();
+        cx.moveTo(Math.random() * 64, Math.random() * 64);
+        cx.lineTo(Math.random() * 64, Math.random() * 64);
+        cx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(2, 2);
+      return tex;
+    };
+
+    const mat = (c: number, r = 0.85) => new THREE.MeshStandardMaterial({
+      color: c, roughness: r, map: makeSkinTex(c),
+    });
+    // Smooth material for non-skin parts (teeth, eyes, claws)
+    const smoothMat = (c: number, r = 0.3) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
+
+    // === BODY — rounded barrel shape using multiple overlapping boxes ===
+    const bodyGroup = new THREE.Group();
+    bodyGroup.position.y = 2.4;
+    trex.add(bodyGroup);
+
+    // Main torso
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.5, 3.0), mat(bodyMid));
+    body.castShadow = true;
+    bodyGroup.add(body);
+    // Rounded top
+    const bodyTop = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.4, 2.6), mat(bodyDark));
+    bodyTop.position.y = 0.8;
+    bodyGroup.add(bodyTop);
+    // Rounded sides with taper
+    for (const s of [-1, 1]) {
+      const side = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.1, 2.4), mat(bodyMid));
+      side.position.set(s * 0.85, 0.1, 0);
+      bodyGroup.add(side);
+      // Shoulder bulk
+      const shoulder = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.6, 0.8), mat(bodyDark));
+      shoulder.position.set(s * 0.75, 0.5, 0.8);
+      bodyGroup.add(shoulder);
+    }
+    // Belly — lighter underside with wrinkle folds
+    const bellyMesh = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 2.4), mat(bellyCol));
+    bellyMesh.position.y = -0.7;
+    bodyGroup.add(bellyMesh);
+    // Belly wrinkle lines
+    for (let i = -3; i <= 3; i++) {
+      const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.02, 0.06), mat(scaleCol));
+      wrinkle.position.set(0, -0.5, i * 0.3);
+      bodyGroup.add(wrinkle);
+    }
+    // Ribcage bumps — visible ribs under skin
+    for (let i = -3; i <= 3; i++) {
+      for (const s of [-1, 1]) {
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.25, 0.12), mat(bodyDark));
+        rib.position.set(s * 0.82, -0.15 + Math.abs(i) * 0.04, i * 0.35);
+        rib.rotation.z = s * 0.15;
+        bodyGroup.add(rib);
+      }
+    }
+    // Scale texture bumps along the back — rows of raised scales
+    for (let i = -5; i <= 5; i++) {
+      for (let j = -2; j <= 2; j++) {
+        const bump = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.06, 0.1), mat(scaleCol));
+        bump.position.set(j * 0.25, 0.95, i * 0.25);
+        bodyGroup.add(bump);
+      }
+    }
+    // Spine ridge — prominent bumps down the center
+    for (let i = -4; i <= 5; i++) {
+      const spine = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.12, 4), mat(scaleCol));
+      spine.position.set(0, 1.0, i * 0.28);
+      bodyGroup.add(spine);
+    }
+    // Skin folds at joints — where body meets legs
+    for (const s of [-1, 1]) {
+      for (let i = 0; i < 3; i++) {
+        const fold = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.03, 0.15), mat(scaleCol));
+        fold.position.set(s * 0.6, -0.55 - i * 0.08, -0.3 + i * 0.1);
+        fold.rotation.z = s * 0.2;
+        bodyGroup.add(fold);
+      }
+    }
+
+    // === NECK — multiple segments for realistic curve ===
+    const neckBase = new THREE.Group();
+    neckBase.position.set(0, 0.3, 1.5);
+    bodyGroup.add(neckBase);
+    const neck1 = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.7), mat(bodyMid));
+    neckBase.add(neck1);
+    const neckMid = new THREE.Group();
+    neckMid.position.set(0, 0.4, 0.4);
+    neckBase.add(neckMid);
+    const neck2 = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.6), mat(bodyLight));
+    neckMid.add(neck2);
+    // Neck wrinkles/folds — more of them for realism
+    for (let i = 0; i < 5; i++) {
+      const fold = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.03, 0.5), mat(scaleCol));
+      fold.position.set(0, -0.3 + i * 0.15, 0);
+      neckMid.add(fold);
+    }
+    // Neck muscle/tendon lines
+    for (const s of [-1, 1]) {
+      const tendon = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.7, 0.08), mat(bodyDark));
+      tendon.position.set(s * 0.3, 0, 0.15);
+      neckMid.add(tendon);
+    }
+    // Dewlap/throat pouch
+    const dewlap = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.25, 0.5), mat(bellyCol));
+    dewlap.position.set(0, -0.45, 0.1);
+    neckBase.add(dewlap);
+    const neck = neckBase; // for animation reference
+
+    // === HEAD — detailed skull ===
+    const headGroup = new THREE.Group();
+    headGroup.position.set(0, 0.6, 0.5);
+    neckMid.add(headGroup);
+
+    // Upper skull — tapered snout
+    const skullBack = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.8, 0.8), mat(bodyMid));
+    skullBack.position.z = -0.1;
+    headGroup.add(skullBack);
+    const skullMid = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.7, 0.6), mat(bodyDark));
+    skullMid.position.z = 0.4;
+    headGroup.add(skullMid);
+    const snout = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.55, 0.6), mat(bodyMid));
+    snout.position.z = 0.8;
+    headGroup.add(snout);
+    const snoutTip = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.3), mat(bodyLight));
+    snoutTip.position.z = 1.15;
+    headGroup.add(snoutTip);
+    // Brow ridges — thick and prominent
+    for (const s of [-1, 1]) {
+      const brow = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.5), mat(scaleCol));
+      brow.position.set(s * 0.4, 0.4, 0.2);
+      headGroup.add(brow);
+      // Extra brow bump
+      const browBump = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.1, 0.2), mat(bodyDark));
+      browBump.position.set(s * 0.35, 0.48, 0.3);
+      headGroup.add(browBump);
+    }
+    // Skull bumps/texture — more of them
+    for (let i = 0; i < 10; i++) {
+      const bump = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.07), mat(scaleCol));
+      bump.position.set((Math.random() - 0.5) * 0.9, 0.42, -0.3 + i * 0.18);
+      headGroup.add(bump);
+    }
+    // Wrinkles on snout
+    for (let i = 0; i < 4; i++) {
+      const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.5 - i * 0.06, 0.02, 0.04), mat(scaleCol));
+      wrinkle.position.set(0, 0.25 - i * 0.03, 0.5 + i * 0.18);
+      headGroup.add(wrinkle);
+    }
+    // Battle scars — lines across the face
+    const scarMat = new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: 0.6 });
+    const scar1 = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.4, 0.02), scarMat);
+    scar1.position.set(0.3, 0.15, 0.5);
+    scar1.rotation.z = 0.3;
+    headGroup.add(scar1);
+    const scar2 = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.3, 0.02), scarMat);
+    scar2.position.set(-0.2, 0.1, 0.7);
+    scar2.rotation.z = -0.2;
+    headGroup.add(scar2);
+    // Cheek/jaw muscle bulge
+    for (const s of [-1, 1]) {
+      const cheek = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.3, 0.35), mat(bodyMid));
+      cheek.position.set(s * 0.52, -0.05, 0.15);
+      headGroup.add(cheek);
+    }
+
+    // Jaw (lower) — hinged
+    const jawPivot = new THREE.Group();
+    jawPivot.position.set(0, -0.3, -0.1);
+    headGroup.add(jawPivot);
+    const jawMain = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.3, 1.2), mat(bodyLight));
+    jawMain.position.set(0, -0.1, 0.5);
+    jawPivot.add(jawMain);
+    const jawTip = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.3), mat(bodyMid));
+    jawTip.position.set(0, -0.1, 1.15);
+    jawPivot.add(jawTip);
+    // Gums
+    const gumTop = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.9), mat(gumCol));
+    gumTop.position.set(0, -0.38, 0.6);
+    headGroup.add(gumTop);
+    const gumBot = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.06, 0.8), mat(gumCol));
+    gumBot.position.set(0, 0.05, 0.5);
+    jawPivot.add(gumBot);
+    // Tongue
+    const tongue = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.5), mat(tongueCol));
+    tongue.position.set(0, 0.02, 0.4);
+    jawPivot.add(tongue);
+
+    // Teeth — top row (various sizes, banana-curved like real T-Rex)
+    const topTeethSizes = [0.06, 0.1, 0.14, 0.18, 0.2, 0.18, 0.2, 0.18, 0.14, 0.1, 0.06];
+    for (let i = 0; i < topTeethSizes.length; i++) {
+      const tooth = new THREE.Mesh(
+        new THREE.ConeGeometry(0.035, topTeethSizes[i], 5),
+        smoothMat(teethCol, 0.2)
+      );
+      tooth.position.set(-0.3 + i * 0.06, -0.42, 0.3 + Math.sin(i * 0.6) * 0.35);
+      tooth.rotation.x = Math.PI;
+      tooth.rotation.z = (i - 5) * 0.04;
+      // Slight backward curve
+      tooth.rotation.y = (i - 5) * 0.02;
+      headGroup.add(tooth);
+    }
+    // Bottom teeth — slightly smaller
+    for (let i = 0; i < 9; i++) {
+      const h = 0.06 + Math.sin(i * 0.8) * 0.06;
+      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.025, h, 5), smoothMat(teethCol, 0.2));
+      tooth.position.set(-0.24 + i * 0.06, 0.08, 0.3 + Math.sin(i * 0.6) * 0.3);
+      jawPivot.add(tooth);
+    }
+    // Saliva strands between teeth (thin white cylinders)
+    for (let i = 0; i < 3; i++) {
+      const strand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.003, 0.003, 0.15, 3),
+        smoothMat(0xddddcc, 0.1)
+      );
+      strand.position.set(-0.1 + i * 0.1, -0.2, 0.5 + i * 0.1);
+      headGroup.add(strand);
+    }
+
+    // Eyes — with iris detail, eyelids, veins
+    for (const s of [-1, 1]) {
+      // Deep eye socket
+      const socket = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.22, 0.14), mat(scaleCol));
+      socket.position.set(s * 0.48, 0.2, 0.24);
+      headGroup.add(socket);
+      // Eyeball
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), smoothMat(0xeeeedd, 0.15));
+      eye.position.set(s * 0.48, 0.22, 0.32);
+      headGroup.add(eye);
+      // Bloodshot veins on eyeball
+      for (let v = 0; v < 3; v++) {
+        const vein = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.002, 0.002, 0.08, 3),
+          smoothMat(0xaa3333, 0.2)
+        );
+        vein.position.set(s * 0.48 + Math.cos(v * 2) * 0.04, 0.22 + Math.sin(v * 2) * 0.04, 0.315);
+        vein.rotation.z = v * 1.1;
+        headGroup.add(vein);
+      }
+      // Iris — golden amber
+      const iris = new THREE.Mesh(new THREE.CircleGeometry(0.065, 12), smoothMat(eyeCol, 0.2));
+      iris.position.set(s * 0.48, 0.22, 0.42);
+      headGroup.add(iris);
+      // Slit pupil — vertical
+      const pup = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.09, 0.01), smoothMat(pupilCol));
+      pup.position.set(s * 0.48, 0.22, 0.425);
+      headGroup.add(pup);
+      // Upper eyelid (half-closed, menacing)
+      const eyelid = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.06, 0.1), mat(bodyDark));
+      eyelid.position.set(s * 0.48, 0.29, 0.34);
+      eyelid.rotation.x = 0.2;
+      headGroup.add(eyelid);
+      // Under-eye wrinkles
+      for (let w = 0; w < 2; w++) {
+        const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.015, 0.04), mat(scaleCol));
+        wrinkle.position.set(s * 0.48, 0.12 - w * 0.04, 0.32);
+        headGroup.add(wrinkle);
+      }
+    }
+
+    // Nostrils — larger, more defined
+    for (const s of [-1, 1]) {
+      const nostrilOuter = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), mat(bodyDark));
+      nostrilOuter.position.set(s * 0.16, 0.1, 1.28);
+      headGroup.add(nostrilOuter);
+      const nostrilInner = new THREE.Mesh(new THREE.SphereGeometry(0.035, 5, 5), smoothMat(0x0a0a05));
+      nostrilInner.position.set(s * 0.16, 0.1, 1.32);
+      headGroup.add(nostrilInner);
+    }
+
+    // === TAIL — chain of pivoting segments ===
+    const tailPivots: THREE.Group[] = [];
+    let tailParent: THREE.Object3D = bodyGroup;
+    let tailZ = -1.5;
+    const tailSegs = 8;
+    for (let i = 0; i < tailSegs; i++) {
+      const s = 1 - i * 0.1;
+      const pivot = new THREE.Group();
+      if (i === 0) {
+        pivot.position.set(0, 0, tailZ);
+        tailParent.add(pivot);
+      } else {
+        pivot.position.set(0, 0, -0.55);
+        tailParent.add(pivot);
+      }
+      const seg = new THREE.Mesh(
+        new THREE.BoxGeometry(0.55 * s, 0.45 * s, 0.6),
+        mat(i % 2 === 0 ? bodyMid : bodyDark)
+      );
+      seg.castShadow = true;
+      pivot.add(seg);
+      // Scale bumps on tail
+      if (i < 5) {
+        const ridge = new THREE.Mesh(new THREE.ConeGeometry(0.06 * s, 0.2 * s, 4), mat(scaleCol));
+        ridge.position.y = 0.25 * s;
+        pivot.add(ridge);
+      }
+      tailPivots.push(pivot);
+      tailParent = pivot;
+    }
+    // Tail tip
+    const tailTip = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.3, 4), mat(bodyDark));
+    tailTip.position.set(0, 0, -0.3);
+    tailTip.rotation.x = Math.PI / 2;
+    tailParent.add(tailTip);
+
+    // === LEGS — jointed with muscle detail ===
+    const legPivots: { thighPivot: THREE.Group; shinPivot: THREE.Group; footPivot: THREE.Group; side: number }[] = [];
+    for (const side of [-1, 1]) {
+      // Hip joint
+      const hipBulge = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), mat(bodyMid));
+      hipBulge.position.set(side * 0.7, 2.0, -0.2);
+      trex.add(hipBulge);
+
+      const thighPivot = new THREE.Group();
+      thighPivot.position.set(side * 0.7, 1.8, -0.2);
+      trex.add(thighPivot);
+      // Thick muscular thigh
+      const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.3, 0.65), mat(bodyMid));
+      thigh.position.y = -0.65;
+      thigh.castShadow = true;
+      thighPivot.add(thigh);
+      // Thigh muscle bulge
+      const thighMuscle = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.5), mat(bodyLight));
+      thighMuscle.position.set(side * 0.1, -0.3, 0.1);
+      thighPivot.add(thighMuscle);
+
+      // Knee joint
+      const kneeBulge = new THREE.Mesh(new THREE.SphereGeometry(0.2, 6, 6), mat(bodyDark));
+      kneeBulge.position.y = -1.3;
+      thighPivot.add(kneeBulge);
+
+      const shinPivot = new THREE.Group();
+      shinPivot.position.y = -1.3;
+      thighPivot.add(shinPivot);
+      // Shin — thinner
+      const shin = new THREE.Mesh(new THREE.BoxGeometry(0.35, 1.1, 0.4), mat(bodyDark));
+      shin.position.y = -0.55;
+      shinPivot.add(shin);
+      // Calf muscle
+      const calf = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 0.35), mat(bodyMid));
+      calf.position.set(0, -0.25, -0.1);
+      shinPivot.add(calf);
+
+      // Ankle
+      const ankleBulge = new THREE.Mesh(new THREE.SphereGeometry(0.12, 5, 5), mat(bodyDark));
+      ankleBulge.position.y = -1.1;
+      shinPivot.add(ankleBulge);
+
+      const footPivot = new THREE.Group();
+      footPivot.position.y = -1.1;
+      shinPivot.add(footPivot);
+      // Foot pad
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.15, 0.7), mat(bodyDark));
+      foot.position.set(0, -0.08, 0.15);
+      footPivot.add(foot);
+      // 3 toes with claws — knuckle detail
+      for (let c = -1; c <= 1; c++) {
+        const toe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.3), mat(bodyMid));
+        toe.position.set(c * 0.14, -0.08, 0.5);
+        footPivot.add(toe);
+        // Knuckle bump
+        const knuckle = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 5), mat(bodyDark));
+        knuckle.position.set(c * 0.14, -0.02, 0.4);
+        footPivot.add(knuckle);
+        // Claw — curved, shiny keratin
+        const claw = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.22, 5), smoothMat(clawCol, 0.3));
+        claw.position.set(c * 0.14, -0.1, 0.72);
+        claw.rotation.x = Math.PI / 2 + 0.2; // slight curve
+        footPivot.add(claw);
+      }
+      // Back toe/dewclaw
+      const dewclaw = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.14, 4), smoothMat(clawCol, 0.3));
+      dewclaw.position.set(0, -0.05, -0.2);
+      dewclaw.rotation.x = -Math.PI / 2;
+      footPivot.add(dewclaw);
+      // Skin wrinkles around ankle
+      for (let w = 0; w < 3; w++) {
+        const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.08), mat(scaleCol));
+        wrinkle.position.set(0, 0.05 + w * 0.06, 0);
+        footPivot.add(wrinkle);
+      }
+
+      legPivots.push({ thighPivot, shinPivot, footPivot, side });
+    }
+
+    // === TINY ARMS with clawed fingers ===
+    const armPivots: THREE.Group[] = [];
+    for (const side of [-1, 1]) {
+      const armPivot = new THREE.Group();
+      armPivot.position.set(side * 0.65, 2.8, 1.3);
+      trex.add(armPivot);
+      // Upper arm
+      const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), mat(bodyLight));
+      upperArm.position.y = -0.18;
+      armPivot.add(upperArm);
+      // Forearm
+      const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.25, 0.1), mat(bodyMid));
+      forearm.position.set(0, -0.45, 0.05);
+      armPivot.add(forearm);
+      // 2-fingered hand (T-Rex had 2 fingers!)
+      for (const f of [-1, 1]) {
+        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.04), mat(bodyDark));
+        finger.position.set(f * 0.04, -0.6, 0.05);
+        armPivot.add(finger);
+        const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 3), smoothMat(clawCol, 0.3));
+        fClaw.position.set(f * 0.04, -0.68, 0.05);
+        fClaw.rotation.x = Math.PI;
+        armPivot.add(fClaw);
+      }
+      armPivot.rotation.z = side * 0.5;
+      armPivot.rotation.x = -0.3;
+      armPivots.push(armPivot);
+    }
+
+    // === BACK RIDGES — dorsal bumps ===
+    for (let i = -3; i <= 4; i++) {
+      const h = 0.15 + Math.sin((i + 3) * 0.4) * 0.1;
+      const ridge = new THREE.Mesh(new THREE.ConeGeometry(0.07, h, 4), mat(scaleCol));
+      ridge.position.set(0, 3.35, -0.3 + i * 0.35);
+      trex.add(ridge);
+    }
+
+    // Scale for presence
+    trex.scale.set(1.4, 1.4, 1.4);
+
+    // Start position — edge of map, facing toward landing spot
+    const angle = Math.atan2(targetX, targetZ);
+    const startDist = 500;
+    const startX = targetX - Math.sin(angle) * startDist;
+    const startZ = targetZ - Math.cos(angle) * startDist;
+
+    trex.position.set(startX, 0, startZ);
+    trex.rotation.y = angle;
+    this.scene3d.add(trex);
+
+    // Place player model on the T-Rex's back — sitting pose
+    this.playerModel.visible = true;
+    this.playerPos.set(startX, 0, startZ);
+
+    // Pose player: sitting with legs dangling
+    this.pLeftThigh.rotation.x = -1.4;   // legs forward (sitting)
+    this.pRightThigh.rotation.x = -1.4;
+    this.pLeftShin.rotation.x = 1.2;     // shins hang down
+    this.pRightShin.rotation.x = 1.2;
+    this.pTorso.rotation.x = -0.1;       // lean back slightly, relaxed
+    // Arms resting at sides
+    this.pLeftUpperArm.rotation.x = -0.3;
+    this.pLeftUpperArm.rotation.z = 0.3;
+    this.pRightUpperArm.rotation.x = -0.3;
+    this.pRightUpperArm.rotation.z = -0.3;
+
+    // HUD overlay for the ride
+    const rideHud = document.createElement('div');
+    rideHud.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;pointer-events:none;';
+    const rideText = document.createElement('div');
+    rideText.textContent = 'RIDING TO BATTLE...';
+    rideText.style.cssText = 'position:absolute;top:30px;left:50%;transform:translateX(-50%);color:#fff;font-family:sans-serif;font-size:24px;font-weight:bold;text-shadow:0 0 15px #f80,2px 2px 4px #000;letter-spacing:4px;';
+    rideHud.appendChild(rideText);
+    document.body.appendChild(rideHud);
+
+    // Look-around controls — just move mouse or swipe to look, no click needed
+    let camYaw = 0;
+    let camPitch = 0;
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    const touchOverlay = document.createElement('div');
+    touchOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:10000;touch-action:none;cursor:none;';
+    document.body.appendChild(touchOverlay);
+
+    // Mouse — position on screen maps directly to camera angle (no clicking needed)
+    const onMouseMove = (e: MouseEvent) => {
+      // Map mouse X position to yaw: full 360 degree orbit
+      camYaw = ((e.clientX / screenW) - 0.5) * Math.PI * 4;
+      // Map mouse Y position to pitch: top = look up, bottom = look down
+      camPitch = ((e.clientY / screenH) - 0.5) * 2.0;
+      camPitch = Math.max(-1.2, Math.min(1.5, camPitch));
+    };
+    window.addEventListener('mousemove', onMouseMove);
+
+    // Touch — swipe to adjust look angle
+    let lastTouchX = -1, lastTouchY = -1;
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault();
+      if (e.touches.length > 0) {
+        lastTouchX = e.touches[0].clientX;
+        lastTouchY = e.touches[0].clientY;
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      if (e.touches.length > 0 && lastTouchX >= 0) {
+        camYaw += (e.touches[0].clientX - lastTouchX) * 0.015;
+        camPitch += (e.touches[0].clientY - lastTouchY) * 0.01;
+        camPitch = Math.max(-1.2, Math.min(1.5, camPitch));
+        lastTouchX = e.touches[0].clientX;
+        lastTouchY = e.touches[0].clientY;
+      }
+    };
+    const onTouchEnd = (e: TouchEvent) => { e.preventDefault(); lastTouchX = -1; };
+    touchOverlay.addEventListener('touchstart', onTouchStart, { passive: false });
+    touchOverlay.addEventListener('touchmove', onTouchMove, { passive: false });
+    touchOverlay.addEventListener('touchend', onTouchEnd, { passive: false });
+
+    const cleanupLookControls = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      touchOverlay.remove();
+    };
+
+    // Animate the ride
+    const rideSpeed = 20; // world units per second (slower ride)
+    const totalDist = Math.sqrt((targetX - startX) ** 2 + (targetZ - startZ) ** 2);
+    const rideDuration = totalDist / rideSpeed;
+    let rideTime = 0;
+    const rideClock = new THREE.Clock();
+    let legPhase = 0;
+
+    const animateRide = () => {
+      const dt = Math.min(rideClock.getDelta(), 0.05);
+      rideTime += dt;
+      const t = Math.min(rideTime / rideDuration, 1);
+
+      // Ease: start slow, cruise, slow at end
+      const eased = t < 0.15 ? t * t / 0.15
+        : t > 0.85 ? 1 - (1 - t) * (1 - t) / 0.15
+        : t;
+
+      // Position
+      const px = startX + (targetX - startX) * eased;
+      const pz = startZ + (targetZ - startZ) * eased;
+      trex.position.set(px, 0, pz);
+
+      // Running cycle phase
+      legPhase += dt * 7;
+      const runCycle = legPhase;
+
+      // Body bounce — up/down with each stride
+      const bounce = Math.abs(Math.sin(runCycle)) * 0.2;
+      bodyGroup.position.y = 2.4 + bounce;
+
+      // Body rocks side to side with weight transfer
+      bodyGroup.rotation.z = Math.sin(runCycle) * 0.04;
+      bodyGroup.rotation.x = Math.sin(runCycle * 2) * 0.02; // slight forward lean bob
+
+      // Neck sways with body momentum
+      neckBase.rotation.x = Math.sin(runCycle) * 0.08;
+      neckMid.rotation.x = Math.sin(runCycle + 0.3) * 0.06;
+
+      // Head bobs — looks forward, slight nod with each step
+      headGroup.rotation.x = Math.sin(runCycle) * 0.1;
+      headGroup.rotation.y = Math.sin(runCycle * 0.5) * 0.03;
+
+      // Jaw bounces open slightly on heavy footfalls
+      jawPivot.rotation.x = Math.abs(Math.sin(runCycle)) * 0.08;
+
+      // Leg running animation — opposite legs alternate
+      for (let i = 0; i < legPivots.length; i++) {
+        const leg = legPivots[i];
+        const phase = runCycle + (i === 0 ? 0 : Math.PI);
+        // Thigh swings forward and back
+        leg.thighPivot.rotation.x = Math.sin(phase) * 0.7;
+        // Shin bends back more when leg is behind (like a real knee)
+        leg.shinPivot.rotation.x = Math.max(0, -Math.sin(phase)) * 0.8 + 0.2;
+        // Foot compensates to stay flat-ish
+        leg.footPivot.rotation.x = -leg.thighPivot.rotation.x * 0.3 - leg.shinPivot.rotation.x * 0.4;
+      }
+
+      // Tiny arms bounce with steps
+      for (let i = 0; i < armPivots.length; i++) {
+        const phase = runCycle + (i === 0 ? Math.PI : 0);
+        armPivots[i].rotation.x = -0.3 + Math.sin(phase) * 0.3;
+      }
+
+      // Tail — wave propagates down chain of pivots
+      for (let i = 0; i < tailPivots.length; i++) {
+        const delay = i * 0.4;
+        tailPivots[i].rotation.y = Math.sin(runCycle + delay) * (0.12 + i * 0.02);
+        tailPivots[i].rotation.x = Math.sin(runCycle * 0.5 + delay) * 0.03;
+      }
+
+      // Ground shake effect — slight camera offset
+      const shake = t < 0.9 ? Math.sin(rideTime * 12) * 0.05 : 0;
+
+      // Player rides on top — sitting
+      this.playerPos.set(px, 0, pz);
+      const seatBounce = Math.abs(Math.sin(runCycle)) * 0.15;
+      this.playerModel.position.set(px, 4.0 + seatBounce, pz);
+      this.playerModel.rotation.y = angle;
+
+      // Legs dangle/swing slightly while sitting — lazy kick
+      this.pLeftShin.rotation.x = 1.2 + Math.sin(rideTime * 1.5) * 0.25;
+      this.pRightShin.rotation.x = 1.2 + Math.sin(rideTime * 1.5 + 2) * 0.25;
+      // Feet flex
+      this.pLeftThigh.rotation.x = -1.4 + Math.sin(rideTime * 0.8) * 0.05;
+      this.pRightThigh.rotation.x = -1.4 + Math.sin(rideTime * 0.8 + 1.5) * 0.05;
+
+      // Camera orbits around the T-Rex based on drag input
+      const camDist = 12;
+      const camHeight = 6 + camPitch * 6;
+      const totalAngle = angle + Math.PI + camYaw; // behind the T-Rex + user offset
+      const camX = px + Math.sin(totalAngle) * camDist;
+      const camZ = pz + Math.cos(totalAngle) * camDist;
+      this.camera.position.set(camX + shake, camHeight, camZ);
+      this.camera.lookAt(px, 2.5, pz);
+
+      // Dust particles on the ground
+      if (Math.random() < 0.4) {
+        const dustGeo = new THREE.SphereGeometry(0.3 + Math.random() * 0.4, 4, 4);
+        const dustMat = new THREE.MeshBasicMaterial({ color: 0x8a7a5a, transparent: true, opacity: 0.5 });
+        const dust = new THREE.Mesh(dustGeo, dustMat);
+        dust.position.set(
+          px + (Math.random() - 0.5) * 3,
+          Math.random() * 0.5,
+          pz - Math.cos(angle) * 2 + (Math.random() - 0.5) * 2
+        );
+        this.scene3d.add(dust);
+        // Fade and remove dust
+        const dustStart = rideTime;
+        const fadeDust = () => {
+          const age = rideTime - dustStart;
+          if (age > 0.8 || t >= 1) {
+            this.scene3d.remove(dust);
+            dustGeo.dispose();
+            dustMat.dispose();
+          } else {
+            dust.position.y += 0.02;
+            dustMat.opacity = 0.5 * (1 - age / 0.8);
+          }
+        };
+        (dust as any)._fade = fadeDust;
+      }
+
+      // Fade dust particles
+      this.scene3d.children.forEach((child: any) => {
+        if (child._fade) child._fade();
+      });
+
+      this.threeRenderer.render(this.scene3d, this.camera);
+
+      if (t >= 1) {
+        // Arrived! T-Rex roars and disappears
+        rideText.textContent = 'GO!';
+        rideText.style.color = '#ff4400';
+        rideText.style.fontSize = '48px';
+
+        // Remove T-Rex with a quick fade
+        setTimeout(() => {
+          cleanupLookControls();
+          this.scene3d.remove(trex);
+          rideHud.remove();
+          // Reset player pose
+          this.pLeftThigh.rotation.set(0, 0, 0);
+          this.pRightThigh.rotation.set(0, 0, 0);
+          this.pLeftShin.rotation.set(0, 0, 0);
+          this.pRightShin.rotation.set(0, 0, 0);
+          this.pTorso.rotation.set(0, 0, 0);
+          this.pLeftUpperArm.rotation.set(0, 0, 0);
+          this.pLeftForearm.rotation.set(0, 0, 0);
+          this.pRightUpperArm.rotation.set(0, 0, 0);
+          this.pRightForearm.rotation.set(0, 0, 0);
+          this.pHead.rotation.set(0, 0, 0);
+          // Set player at landing spot
+          this.playerPos.set(targetX, this.getTerrainHeight(targetX, targetZ), targetZ);
+          this.playerModel.position.set(targetX, this.getTerrainHeight(targetX, targetZ), targetZ);
+          onLand();
+        }, 600);
+        return;
+      }
+
+      requestAnimationFrame(animateRide);
+    };
+
+    rideClock.getDelta(); // prime the clock
+    requestAnimationFrame(animateRide);
   }
 
   private startGameLoop(): void {
@@ -722,6 +1487,7 @@ export class BattleScene extends Phaser.Scene {
       this.updateBullets(dt);
       this.updateCars(dt);
       this.updateBearBoss(dt);
+      if (this.isMultiplayer) this.updateMultiplayer(dt);
       if (this.shootCooldown > 0) this.shootCooldown -= dt;
       this.checkPickups();
       // Update health bars
@@ -787,7 +1553,7 @@ export class BattleScene extends Phaser.Scene {
       new THREE.MeshStandardMaterial({ color: 0x9a5a10, side: THREE.DoubleSide }),
     ];
 
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 200; i++) {
       const x = (Math.random() - 0.5) * 950;
       const z = (Math.random() - 0.5) * 950;
       if (this.isOnRoad(x, z)) continue;
@@ -2348,94 +3114,321 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private createCars(): void {
-    const carColors = [0xff0000, 0x0044ff, 0xffdd00, 0x00cc00, 0xff6600, 0xffffff, 0x111111, 0x8800ff, 0x00cccc, 0xff00aa];
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
-    const tireMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1 });
-    const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, metalness: 0.3, roughness: 0.1, transparent: true, opacity: 0.6 });
-    const chromeMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.95, roughness: 0.05 });
+    // T-Rex colors — each one slightly different
+    const rexColors = [
+      { body: 0x4a3a28, light: 0x6a5a3a },
+      { body: 0x3a4a2a, light: 0x5a6a3a },
+      { body: 0x5a3a2a, light: 0x7a5a3a },
+      { body: 0x3a3a3a, light: 0x5a5a5a },
+      { body: 0x4a2a1a, light: 0x6a4a2a },
+      { body: 0x2a4a3a, light: 0x4a6a5a },
+      { body: 0x5a4a3a, light: 0x7a6a5a },
+      { body: 0x3a2a2a, light: 0x5a4a4a },
+    ];
 
     for (let i = 0; i < 20; i++) {
       const group = new THREE.Group();
-      const color = carColors[Math.floor(Math.random() * carColors.length)];
-      const bodyMat = new THREE.MeshStandardMaterial({ color, metalness: 0.6, roughness: 0.3 });
+      const rc = rexColors[i % rexColors.length];
 
-      // Main body
-      const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.7, 4.5), bodyMat);
-      body.position.y = 0.5;
-      body.castShadow = true;
-      group.add(body);
+      // Procedural scaly skin texture (matches ride T-Rex)
+      const makeSkinTex = (base: number, variation = 0.15) => {
+        const cv = document.createElement('canvas');
+        cv.width = 64; cv.height = 64;
+        const cx2 = cv.getContext('2d')!;
+        const rr = (base >> 16) & 0xff, gg = (base >> 8) & 0xff, bb = base & 0xff;
+        cx2.fillStyle = `rgb(${rr},${gg},${bb})`;
+        cx2.fillRect(0, 0, 64, 64);
+        for (let sy = 0; sy < 64; sy += 4) {
+          for (let sx = 0; sx < 64; sx += 4) {
+            const off = ((sy / 4) % 2) * 2;
+            const v = (Math.random() - 0.5) * variation;
+            const sr = Math.max(0, Math.min(255, rr + rr * v));
+            const sg = Math.max(0, Math.min(255, gg + gg * v));
+            const sb = Math.max(0, Math.min(255, bb + bb * v));
+            cx2.fillStyle = `rgb(${sr|0},${sg|0},${sb|0})`;
+            cx2.fillRect(sx + off, sy, 3, 3);
+            cx2.fillStyle = `rgba(0,0,0,0.15)`;
+            cx2.fillRect(sx + off + 3, sy, 1, 3);
+            cx2.fillRect(sx + off, sy + 3, 4, 1);
+          }
+        }
+        cx2.strokeStyle = 'rgba(0,0,0,0.12)';
+        cx2.lineWidth = 1;
+        for (let ii = 0; ii < 5; ii++) {
+          cx2.beginPath();
+          cx2.moveTo(Math.random() * 64, Math.random() * 64);
+          cx2.lineTo(Math.random() * 64, Math.random() * 64);
+          cx2.stroke();
+        }
+        const tex = new THREE.CanvasTexture(cv);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(2, 2);
+        return tex;
+      };
 
-      // Cabin / roof
-      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.6, 2.2), bodyMat);
-      cabin.position.set(0, 1.1, -0.3);
-      cabin.castShadow = true;
-      group.add(cabin);
+      const bodyDark = rc.body;
+      const bodyMid = rc.body + 0x101008;
+      const bodyLight = rc.light;
+      const bellyCol = rc.light + 0x201810;
+      const scaleCol = rc.body - 0x101010;
+      const clawCol = 0x1a1a10;
+      const teethCol = 0xeeeedd;
+      const eyeCol = 0xddcc44;
+      const pupilCol = 0x111100;
+      const tongueCol = 0x884444;
+      const gumCol = 0x663333;
 
-      // Windshield
-      const windshield = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.55), glassMat);
-      windshield.position.set(0, 1.05, 0.8);
-      windshield.rotation.x = -0.3;
-      group.add(windshield);
+      const dmat = (c: number, r2 = 0.85) => new THREE.MeshStandardMaterial({ color: c, roughness: r2, map: makeSkinTex(c) });
+      const smoothMat2 = (c: number, r2 = 0.3) => new THREE.MeshStandardMaterial({ color: c, roughness: r2 });
 
-      // Rear window
-      const rearWin = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.5), glassMat);
-      rearWin.position.set(0, 1.05, -1.4);
-      rearWin.rotation.x = 0.3;
-      group.add(rearWin);
+      // === BODY ===
+      const bodyGroup = new THREE.Group();
+      bodyGroup.position.y = 2.4;
+      group.add(bodyGroup);
+      const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.5, 3.0), dmat(bodyMid));
+      bodyMesh.castShadow = true; bodyGroup.add(bodyMesh);
+      const bodyTop = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.4, 2.6), dmat(bodyDark));
+      bodyTop.position.y = 0.8; bodyGroup.add(bodyTop);
+      for (const s of [-1, 1]) {
+        const side = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.1, 2.4), dmat(bodyMid));
+        side.position.set(s * 0.85, 0.1, 0); bodyGroup.add(side);
+        const shoulder = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.6, 0.8), dmat(bodyDark));
+        shoulder.position.set(s * 0.75, 0.5, 0.8); bodyGroup.add(shoulder);
+      }
+      const bellyMesh = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 2.4), dmat(bellyCol));
+      bellyMesh.position.y = -0.7; bodyGroup.add(bellyMesh);
+      for (let bw = -3; bw <= 3; bw++) {
+        const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.02, 0.06), dmat(scaleCol));
+        wrinkle.position.set(0, -0.5, bw * 0.3); bodyGroup.add(wrinkle);
+      }
+      for (let ri = -3; ri <= 3; ri++) {
+        for (const s of [-1, 1]) {
+          const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.25, 0.12), dmat(bodyDark));
+          rib.position.set(s * 0.82, -0.15 + Math.abs(ri) * 0.04, ri * 0.35);
+          rib.rotation.z = s * 0.15; bodyGroup.add(rib);
+        }
+      }
+      for (let si = -4; si <= 5; si++) {
+        const spine = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.12, 4), dmat(scaleCol));
+        spine.position.set(0, 1.0, si * 0.28); bodyGroup.add(spine);
+      }
+      for (const s of [-1, 1]) {
+        for (let fi = 0; fi < 3; fi++) {
+          const fold = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.03, 0.15), dmat(scaleCol));
+          fold.position.set(s * 0.6, -0.55 - fi * 0.08, -0.3 + fi * 0.1);
+          fold.rotation.z = s * 0.2; bodyGroup.add(fold);
+        }
+      }
 
-      // Side windows
+      // === NECK ===
+      const neckBase = new THREE.Group();
+      neckBase.position.set(0, 0.3, 1.5); bodyGroup.add(neckBase);
+      const neck1 = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.7), dmat(bodyMid));
+      neckBase.add(neck1);
+      const neckMid = new THREE.Group();
+      neckMid.position.set(0, 0.4, 0.4); neckBase.add(neckMid);
+      const neck2 = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.6), dmat(bodyLight));
+      neckMid.add(neck2);
+      for (let nf = 0; nf < 5; nf++) {
+        const fold = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.03, 0.5), dmat(scaleCol));
+        fold.position.set(0, -0.3 + nf * 0.15, 0); neckMid.add(fold);
+      }
+      for (const s of [-1, 1]) {
+        const tendon = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.7, 0.08), dmat(bodyDark));
+        tendon.position.set(s * 0.3, 0, 0.15); neckMid.add(tendon);
+      }
+      const dewlap = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.25, 0.5), dmat(bellyCol));
+      dewlap.position.set(0, -0.45, 0.1); neckBase.add(dewlap);
+
+      // === HEAD ===
+      const headGroup = new THREE.Group();
+      headGroup.position.set(0, 0.6, 0.5); neckMid.add(headGroup);
+      const skullBack = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.8, 0.8), dmat(bodyMid));
+      skullBack.position.z = -0.1; headGroup.add(skullBack);
+      const skullMid2 = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.7, 0.6), dmat(bodyDark));
+      skullMid2.position.z = 0.4; headGroup.add(skullMid2);
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.55, 0.6), dmat(bodyMid));
+      snout.position.z = 0.8; headGroup.add(snout);
+      const snoutTip = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.3), dmat(bodyLight));
+      snoutTip.position.z = 1.15; headGroup.add(snoutTip);
+      for (const s of [-1, 1]) {
+        const brow = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.5), dmat(scaleCol));
+        brow.position.set(s * 0.4, 0.4, 0.2); headGroup.add(brow);
+        const browBump = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.1, 0.2), dmat(bodyDark));
+        browBump.position.set(s * 0.35, 0.48, 0.3); headGroup.add(browBump);
+      }
+      for (let wi = 0; wi < 4; wi++) {
+        const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.5 - wi * 0.06, 0.02, 0.04), dmat(scaleCol));
+        wrinkle.position.set(0, 0.25 - wi * 0.03, 0.5 + wi * 0.18); headGroup.add(wrinkle);
+      }
+      const scarMat = new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: 0.6 });
+      const scar1 = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.4, 0.02), scarMat);
+      scar1.position.set(0.3, 0.15, 0.5); scar1.rotation.z = 0.3; headGroup.add(scar1);
+      const scar2 = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.3, 0.02), scarMat);
+      scar2.position.set(-0.2, 0.1, 0.7); scar2.rotation.z = -0.2; headGroup.add(scar2);
+      for (const s of [-1, 1]) {
+        const cheek = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.3, 0.35), dmat(bodyMid));
+        cheek.position.set(s * 0.52, -0.05, 0.15); headGroup.add(cheek);
+      }
+
+      // Jaw
+      const jawPivot = new THREE.Group();
+      jawPivot.position.set(0, -0.3, -0.1); headGroup.add(jawPivot);
+      const jawMain = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.3, 1.2), dmat(bodyLight));
+      jawMain.position.set(0, -0.1, 0.5); jawPivot.add(jawMain);
+      const jawTip = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.3), dmat(bodyMid));
+      jawTip.position.set(0, -0.1, 1.15); jawPivot.add(jawTip);
+      const gumTop = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.9), dmat(gumCol));
+      gumTop.position.set(0, -0.38, 0.6); headGroup.add(gumTop);
+      const gumBot = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.06, 0.8), dmat(gumCol));
+      gumBot.position.set(0, 0.05, 0.5); jawPivot.add(gumBot);
+      const tongue = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.5), dmat(tongueCol));
+      tongue.position.set(0, 0.02, 0.4); jawPivot.add(tongue);
+
+      // Teeth — top row
+      const topTeethSizes = [0.06, 0.1, 0.14, 0.18, 0.2, 0.18, 0.2, 0.18, 0.14, 0.1, 0.06];
+      for (let ti = 0; ti < topTeethSizes.length; ti++) {
+        const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.035, topTeethSizes[ti], 5), smoothMat2(teethCol, 0.2));
+        tooth.position.set(-0.3 + ti * 0.06, -0.42, 0.3 + Math.sin(ti * 0.6) * 0.35);
+        tooth.rotation.x = Math.PI; tooth.rotation.z = (ti - 5) * 0.04;
+        tooth.rotation.y = (ti - 5) * 0.02; headGroup.add(tooth);
+      }
+      for (let ti = 0; ti < 9; ti++) {
+        const h = 0.06 + Math.sin(ti * 0.8) * 0.06;
+        const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.025, h, 5), smoothMat2(teethCol, 0.2));
+        tooth.position.set(-0.24 + ti * 0.06, 0.08, 0.3 + Math.sin(ti * 0.6) * 0.3);
+        jawPivot.add(tooth);
+      }
+      // Saliva
+      for (let si2 = 0; si2 < 3; si2++) {
+        const strand = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, 0.15, 3), smoothMat2(0xddddcc, 0.1));
+        strand.position.set(-0.1 + si2 * 0.1, -0.2, 0.5 + si2 * 0.1); headGroup.add(strand);
+      }
+
+      // Eyes
+      for (const s of [-1, 1]) {
+        const socket = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.22, 0.14), dmat(scaleCol));
+        socket.position.set(s * 0.48, 0.2, 0.24); headGroup.add(socket);
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), smoothMat2(0xeeeedd, 0.15));
+        eye.position.set(s * 0.48, 0.22, 0.32); headGroup.add(eye);
+        for (let v = 0; v < 3; v++) {
+          const vein = new THREE.Mesh(new THREE.CylinderGeometry(0.002, 0.002, 0.08, 3), smoothMat2(0xaa3333, 0.2));
+          vein.position.set(s * 0.48 + Math.cos(v * 2) * 0.04, 0.22 + Math.sin(v * 2) * 0.04, 0.315);
+          vein.rotation.z = v * 1.1; headGroup.add(vein);
+        }
+        const iris = new THREE.Mesh(new THREE.CircleGeometry(0.065, 12), smoothMat2(eyeCol, 0.2));
+        iris.position.set(s * 0.48, 0.22, 0.42); headGroup.add(iris);
+        const pup = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.09, 0.01), smoothMat2(pupilCol));
+        pup.position.set(s * 0.48, 0.22, 0.425); headGroup.add(pup);
+        const eyelid = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.06, 0.1), dmat(bodyDark));
+        eyelid.position.set(s * 0.48, 0.29, 0.34); eyelid.rotation.x = 0.2; headGroup.add(eyelid);
+        for (let w = 0; w < 2; w++) {
+          const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.015, 0.04), dmat(scaleCol));
+          wrinkle.position.set(s * 0.48, 0.12 - w * 0.04, 0.32); headGroup.add(wrinkle);
+        }
+      }
+      // Nostrils
+      for (const s of [-1, 1]) {
+        const nostrilOuter = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), dmat(bodyDark));
+        nostrilOuter.position.set(s * 0.16, 0.1, 1.28); headGroup.add(nostrilOuter);
+        const nostrilInner = new THREE.Mesh(new THREE.SphereGeometry(0.035, 5, 5), smoothMat2(0x0a0a05));
+        nostrilInner.position.set(s * 0.16, 0.1, 1.32); headGroup.add(nostrilInner);
+      }
+
+      // === TAIL ===
+      const carTailPivots: THREE.Group[] = [];
+      let tailParent: THREE.Object3D = bodyGroup;
+      let tailZ2 = -1.5;
+      for (let ti = 0; ti < 8; ti++) {
+        const sc = 1 - ti * 0.1;
+        const pivot = new THREE.Group();
+        if (ti === 0) { pivot.position.set(0, 0, tailZ2); tailParent.add(pivot); }
+        else { pivot.position.set(0, 0, -0.55); tailParent.add(pivot); }
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.55 * sc, 0.45 * sc, 0.6), dmat(ti % 2 === 0 ? bodyMid : bodyDark));
+        seg.castShadow = true; pivot.add(seg);
+        if (ti < 5) {
+          const ridge = new THREE.Mesh(new THREE.ConeGeometry(0.06 * sc, 0.2 * sc, 4), dmat(scaleCol));
+          ridge.position.y = 0.25 * sc; pivot.add(ridge);
+        }
+        carTailPivots.push(pivot);
+        tailParent = pivot;
+      }
+      const tailTip = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.3, 4), dmat(bodyDark));
+      tailTip.position.set(0, 0, -0.3); tailTip.rotation.x = Math.PI / 2; tailParent.add(tailTip);
+
+      // === LEGS ===
+      const carLegPivots: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[] = [];
       for (const side of [-1, 1]) {
-        const sideWin = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.45), glassMat);
-        sideWin.position.set(side * 0.95, 1.05, -0.3);
-        sideWin.rotation.y = side * Math.PI / 2;
-        group.add(sideWin);
+        const hipBulge = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), dmat(bodyMid));
+        hipBulge.position.set(side * 0.7, 2.0, -0.2); group.add(hipBulge);
+        const thighPivot = new THREE.Group();
+        thighPivot.position.set(side * 0.7, 1.8, -0.2); group.add(thighPivot);
+        const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.3, 0.65), dmat(bodyMid));
+        thigh.position.y = -0.65; thigh.castShadow = true; thighPivot.add(thigh);
+        const thighMuscle = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.5), dmat(bodyLight));
+        thighMuscle.position.set(side * 0.1, -0.3, 0.1); thighPivot.add(thighMuscle);
+        const kneeBulge = new THREE.Mesh(new THREE.SphereGeometry(0.2, 6, 6), dmat(bodyDark));
+        kneeBulge.position.y = -1.3; thighPivot.add(kneeBulge);
+        const shinPivot = new THREE.Group();
+        shinPivot.position.y = -1.3; thighPivot.add(shinPivot);
+        const shin = new THREE.Mesh(new THREE.BoxGeometry(0.35, 1.1, 0.4), dmat(bodyDark));
+        shin.position.y = -0.55; shinPivot.add(shin);
+        const calf = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 0.35), dmat(bodyMid));
+        calf.position.set(0, -0.25, -0.1); shinPivot.add(calf);
+        const ankleBulge = new THREE.Mesh(new THREE.SphereGeometry(0.12, 5, 5), dmat(bodyDark));
+        ankleBulge.position.y = -1.1; shinPivot.add(ankleBulge);
+        const footPivot = new THREE.Group();
+        footPivot.position.y = -1.1; shinPivot.add(footPivot);
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.15, 0.7), dmat(bodyDark));
+        foot.position.set(0, -0.08, 0.15); footPivot.add(foot);
+        for (let c = -1; c <= 1; c++) {
+          const toe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.3), dmat(bodyMid));
+          toe.position.set(c * 0.14, -0.08, 0.5); footPivot.add(toe);
+          const knuckle = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 5), dmat(bodyDark));
+          knuckle.position.set(c * 0.14, -0.02, 0.4); footPivot.add(knuckle);
+          const claw = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.22, 5), smoothMat2(clawCol, 0.3));
+          claw.position.set(c * 0.14, -0.1, 0.72); claw.rotation.x = Math.PI / 2 + 0.2; footPivot.add(claw);
+        }
+        const dewclaw = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.14, 4), smoothMat2(clawCol, 0.3));
+        dewclaw.position.set(0, -0.05, -0.2); dewclaw.rotation.x = -Math.PI / 2; footPivot.add(dewclaw);
+        for (let w = 0; w < 3; w++) {
+          const wrinkle = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.08), dmat(scaleCol));
+          wrinkle.position.set(0, 0.05 + w * 0.06, 0); footPivot.add(wrinkle);
+        }
+        carLegPivots.push({ thighPivot, shinPivot, side });
       }
 
-      // Headlights
-      for (const side of [-0.7, 0.7]) {
-        const light = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6),
-          new THREE.MeshBasicMaterial({ color: 0xffffcc }));
-        light.position.set(side, 0.5, 2.25);
-        group.add(light);
+      // === TINY ARMS ===
+      const carArmPivots: THREE.Group[] = [];
+      for (const side of [-1, 1]) {
+        const armPivot = new THREE.Group();
+        armPivot.position.set(side * 0.65, 2.8, 1.3); group.add(armPivot);
+        const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), dmat(bodyLight));
+        upperArm.position.y = -0.18; armPivot.add(upperArm);
+        const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.25, 0.1), dmat(bodyMid));
+        forearm.position.set(0, -0.45, 0.05); armPivot.add(forearm);
+        for (const f of [-1, 1]) {
+          const finger = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.04), dmat(bodyDark));
+          finger.position.set(f * 0.04, -0.6, 0.05); armPivot.add(finger);
+          const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 3), smoothMat2(clawCol, 0.3));
+          fClaw.position.set(f * 0.04, -0.68, 0.05); fClaw.rotation.x = Math.PI; armPivot.add(fClaw);
+        }
+        armPivot.rotation.z = side * 0.5; armPivot.rotation.x = -0.3;
+        carArmPivots.push(armPivot);
       }
 
-      // Taillights
-      for (const side of [-0.7, 0.7]) {
-        const tail = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6),
-          new THREE.MeshBasicMaterial({ color: 0xff0000 }));
-        tail.position.set(side, 0.5, -2.25);
-        group.add(tail);
+      // === BACK RIDGES ===
+      for (let ri = -3; ri <= 4; ri++) {
+        const h = 0.15 + Math.sin((ri + 3) * 0.4) * 0.1;
+        const ridge = new THREE.Mesh(new THREE.ConeGeometry(0.07, h, 4), dmat(scaleCol));
+        ridge.position.set(0, 3.35, -0.3 + ri * 0.35); group.add(ridge);
       }
 
-      // Bumpers
-      const fBumper = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.2, 0.15), chromeMat);
-      fBumper.position.set(0, 0.25, 2.3);
-      group.add(fBumper);
-      const rBumper = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.2, 0.15), chromeMat);
-      rBumper.position.set(0, 0.25, -2.3);
-      group.add(rBumper);
+      group.scale.set(1.4, 1.4, 1.4);
 
-      // Wheels (4)
-      const wheelPositions = [
-        { x: -1.0, z: 1.3 }, { x: 1.0, z: 1.3 },
-        { x: -1.0, z: -1.3 }, { x: 1.0, z: -1.3 },
-      ];
-      for (const wp of wheelPositions) {
-        // Tire
-        const tire = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.12, 8, 12), tireMat);
-        tire.position.set(wp.x, 0.3, wp.z);
-        tire.rotation.y = Math.PI / 2;
-        group.add(tire);
-        // Hub
-        const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.08, 8), wheelMat);
-        hub.position.set(wp.x, 0.3, wp.z);
-        hub.rotation.x = Math.PI / 2;
-        group.add(hub);
-      }
-
-      // Place car
+      // Place T-Rex
       const angle = Math.random() * Math.PI * 2;
-      const speed = 40 + Math.random() * 40; // 40-80 units/sec — very fast
+      const speed = 25 + Math.random() * 25; // slower than cars — they're dinosaurs
       const cx = (Math.random() - 0.5) * 800;
       const cz = (Math.random() - 0.5) * 800;
       group.position.set(cx, this.getTerrainHeight(cx, cz), cz);
@@ -2448,6 +3441,14 @@ export class BattleScene extends Phaser.Scene {
         vz: 0,
         speed,
         driver: 'none',
+        legPivots: carLegPivots,
+        armPivots: carArmPivots,
+        tailPivots: carTailPivots,
+        jawPivot,
+        neckBase,
+        neckMid,
+        bodyGroup,
+        runPhase: Math.random() * Math.PI * 2,
       });
     }
   }
@@ -2486,7 +3487,7 @@ export class BattleScene extends Phaser.Scene {
         const spd = car.speed;
         car.vx = -Math.sin(this.lookAngle) * spd * Math.max(-this.moveDir.z, 0);
         car.vz = -Math.cos(this.lookAngle) * spd * Math.max(-this.moveDir.z, 0);
-        car.mesh.rotation.y = this.lookAngle;
+        car.mesh.rotation.y = this.lookAngle + Math.PI;
         car.mesh.position.x += car.vx * dt;
         car.mesh.position.z += car.vz * dt;
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
@@ -2545,7 +3546,7 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.x += car.vx * dt;
         car.mesh.position.z += car.vz * dt;
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
-        if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz);
+        if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz) + Math.PI;
 
         // Sync NPC pos to car
         npc.mesh.position.copy(car.mesh.position);
@@ -2566,37 +3567,37 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.z = Math.sign(car.mesh.position.z) * 449;
       }
 
-      // Player touches car
+      // Player touches T-Rex
       if (car.driver !== 'player') {
         const dx = this.playerPos.x - car.mesh.position.x;
         const dz = this.playerPos.z - car.mesh.position.z;
         const dist = Math.sqrt(dx * dx + dz * dz);
         if (dist < 2.5 && this.playerInCar === -1) {
           if (typeof car.driver === 'string' && car.driver === 'none') {
-            // Empty car — hop in
+            // Empty T-Rex — mount it
             car.driver = 'player';
             this.playerInCar = ci;
             this.playerModel.visible = false;
-            this.showPickupMsg('Driving! W to go, E to exit');
+            this.showPickupMsg('Riding T-Rex! W to go, E to dismount');
           } else {
-            // Driven car hit player — take damage
-            this.playerHP = Math.max(0, this.playerHP - 30);
+            // Ridden T-Rex attacks player — EATEN
+            this.playerHP = Math.max(0, this.playerHP - 40);
             this.playSfx('carHit', 0.6);
             this.hpText.textContent = `HP: ${this.playerHP}`;
             this.playerPos.x += (dx / dist) * 8;
             this.playerPos.z += (dz / dist) * 8;
             if (this.playerHP <= 0) {
-              this.showGameOver('RAN OVER BY A CAR');
+              this.showGameOver('EATEN BY A T-REX');
             }
           }
         }
       }
 
-      // Hit NPCs (not the driver)
+      // T-Rex eats NPCs (not the rider)
       for (let ni = 0; ni < this.npcs.length; ni++) {
         const npc = this.npcs[ni];
         if (npc.dead || ni === car.driver) continue;
-        // Don't hit NPCs that are in cars
+        // Don't eat NPCs that are riding T-Rexes
         if (this.cars.some(c => c.driver === ni)) continue;
         const ndx = npc.mesh.position.x - car.mesh.position.x;
         const ndz = npc.mesh.position.z - car.mesh.position.z;
@@ -2604,12 +3605,14 @@ export class BattleScene extends Phaser.Scene {
         if (ndist < 2.5) {
           npc.hp = 0;
           npc.dead = true;
+          this.coinsEarned += 1000;
+          this.showPickupMsg('T-Rex ate them! +1000 coins!');
           this.spawnDeathFluff(npc.mesh.position.clone());
           this.scene3d.remove(npc.mesh);
         }
       }
 
-      // Hit bear boss with car
+      // T-Rex attacks bear boss
       if (!this.bossDead && this.bossSpawned && this.boss) {
         const bdx = car.mesh.position.x - this.boss.position.x;
         const bdz = car.mesh.position.z - this.boss.position.z;
@@ -2620,15 +3623,64 @@ export class BattleScene extends Phaser.Scene {
           this.playSfx('carHit', 0.8);
           this.bossRoarTimer = 0.8;
           this.playSfx('roar', 0.7);
-          // Bounce the car back
+          // T-Rex recoils from the fight
           car.speed *= -0.5;
           if (this.bossHP <= 0) {
             this.bossDead = true;
+            this.coinsEarned += 1000;
             this.spawnDeathFluff(this.boss.position.clone(), 40);
             this.scene3d.remove(this.boss);
-            this.showPickupMsg('BEAR DEFEATED!');
             this.playSfx('bossDeath', 0.8);
+            setTimeout(() => this.showVictory(), 1500);
           }
+        }
+      }
+
+      // Running animation
+      const spd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
+      if (spd > 1 && car.legPivots && car.armPivots && car.tailPivots) {
+        car.runPhase = (car.runPhase || 0) + dt * 7;
+        const rc = car.runPhase;
+
+        // Body bounce
+        if (car.bodyGroup) {
+          car.bodyGroup.position.y = 2.4 + Math.abs(Math.sin(rc)) * 0.15;
+          car.bodyGroup.rotation.x = Math.sin(rc) * 0.03;
+        }
+
+        // Neck sway
+        if (car.neckBase) {
+          car.neckBase.rotation.x = Math.sin(rc * 0.5) * 0.08;
+          car.neckBase.rotation.y = Math.sin(rc * 0.3) * 0.04;
+        }
+        if (car.neckMid) {
+          car.neckMid.rotation.x = Math.sin(rc * 0.5 + 0.5) * 0.06;
+        }
+
+        // Jaw bounce
+        if (car.jawPivot) {
+          car.jawPivot.rotation.x = Math.abs(Math.sin(rc * 2)) * 0.08;
+        }
+
+        // Leg running
+        for (const leg of car.legPivots) {
+          const phase = rc + (leg.side === 1 ? Math.PI : 0);
+          leg.thighPivot.rotation.x = Math.sin(phase) * 0.7;
+          const backSwing = Math.max(0, Math.sin(phase));
+          leg.shinPivot.rotation.x = backSwing * 0.8;
+        }
+
+        // Arms bounce
+        for (let ai = 0; ai < car.armPivots.length; ai++) {
+          const phase = rc + (ai === 0 ? Math.PI : 0);
+          car.armPivots[ai].rotation.x = -0.3 + Math.sin(phase) * 0.3;
+        }
+
+        // Tail wave
+        for (let ti = 0; ti < car.tailPivots.length; ti++) {
+          const delay = ti * 0.4;
+          car.tailPivots[ti].rotation.y = Math.sin(rc + delay) * (0.12 + ti * 0.02);
+          car.tailPivots[ti].rotation.x = Math.sin(rc * 0.5 + delay) * 0.03;
         }
       }
     }
@@ -3188,7 +4240,7 @@ export class BattleScene extends Phaser.Scene {
     // === ENTER/EXIT CAR BUTTON ===
     const carBtn = document.createElement('div');
     carBtn.style.cssText = 'position:fixed;right:135px;bottom:35px;width:70px;height:70px;border-radius:50%;background:rgba(50,200,50,0.5);border:3px solid rgba(100,255,100,0.6);z-index:200;display:flex;align-items:center;justify-content:center;font:bold 13px Arial;color:white;text-shadow:1px 1px 2px black;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;';
-    carBtn.textContent = 'CAR';
+    carBtn.textContent = 'RIDE';
     this.carBtn = carBtn;
     document.body.appendChild(carBtn);
 
@@ -3435,6 +4487,19 @@ export class BattleScene extends Phaser.Scene {
       owner: -1, // player
     });
     this.playSfx('shoot', 0.4);
+
+    // Broadcast shot to other players
+    if (this.isMultiplayer) {
+      this.network.send({
+        type: 'SHOOT',
+        playerId: this.network.playerId,
+        x: bx, y: by, z: bz,
+        vx: dx * bulletSpeed,
+        vy: dy * bulletSpeed,
+        vz: dz * bulletSpeed,
+        damage,
+      });
+    }
   }
 
   private updateBullets(dt: number): void {
@@ -3447,8 +4512,8 @@ export class BattleScene extends Phaser.Scene {
 
       let hit = false;
 
-      // Check hit against player (if not player's own bullet)
-      if (b.owner !== -1) {
+      // Check hit against local player (NPC bullets only; remote damage comes via PLAYER_HIT message)
+      if (b.owner >= 0) {
         const dx = b.mesh.position.x - this.playerPos.x;
         const dy = b.mesh.position.y - (this.playerPos.y + 1);
         const dz = b.mesh.position.z - this.playerPos.z;
@@ -3478,9 +4543,28 @@ export class BattleScene extends Phaser.Scene {
             hit = true;
             if (npc.hp <= 0) {
               npc.dead = true;
+              this.coinsEarned += 1000;
+              this.showPickupMsg('+1000 coins!');
               this.spawnDeathFluff(npc.mesh.position.clone());
               this.scene3d.remove(npc.mesh);
             }
+            break;
+          }
+        }
+      }
+
+      // Check hit against remote players (only local player's bullets)
+      if (!hit && this.isMultiplayer && b.owner === -1) {
+        for (const [pid, rp] of this.remotePlayers) {
+          if (rp.dead) continue;
+          const dx = b.mesh.position.x - rp.model.position.x;
+          const dz = b.mesh.position.z - rp.model.position.z;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          if (dist < 1.2) {
+            hit = true;
+            this.playSfx('hit', 0.3);
+            // Tell the other player they got hit
+            this.network.send({ type: 'PLAYER_HIT', targetId: pid, damage: b.damage });
             break;
           }
         }
@@ -3499,10 +4583,11 @@ export class BattleScene extends Phaser.Scene {
           this.playSfx('roar', 0.7);
           if (this.bossHP <= 0) {
             this.bossDead = true;
+            this.coinsEarned += 1000;
             this.spawnDeathFluff(this.boss.position.clone(), 40);
             this.scene3d.remove(this.boss);
-            this.showPickupMsg('BEAR DEFEATED!');
             this.playSfx('bossDeath', 0.8);
+            setTimeout(() => this.showVictory(), 1500);
           }
         }
       }
@@ -3845,14 +4930,55 @@ export class BattleScene extends Phaser.Scene {
     cancelAnimationFrame(this.animFrameId);
     if (document.pointerLockElement) document.exitPointerLock();
 
+    // Persist coins
+    const totalCoins = addCoins(this.coinsEarned);
+    const coinHtml = this.coinsEarned > 0
+      ? `<div style="color:#ffdd00;font:bold 32px Arial;text-shadow:0 0 10px #ffaa00;margin-bottom:8px">+${this.coinsEarned} coins!</div>
+         <div style="color:#ffdd00;font:16px Arial;margin-bottom:30px">Total: ${totalCoins} coins</div>`
+      : `<div style="color:#ffdd00;font:16px Arial;margin-bottom:30px">Total: ${totalCoins} coins</div>`;
+
     // Game over overlay
     const overlay = document.createElement('div');
     overlay.id = 'game-over';
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999';
     overlay.innerHTML = `
       <div style="color:#ff2222;font:bold 72px Arial;text-shadow:0 0 20px #ff0000,0 0 40px #aa0000;margin-bottom:20px">GAME OVER</div>
-      <div style="color:#cccccc;font:24px Arial;margin-bottom:40px">${cause}</div>
+      <div style="color:#cccccc;font:24px Arial;margin-bottom:20px">${cause}</div>
+      ${coinHtml}
       <button id="go-retry" style="padding:15px 40px;background:#cc0000;color:white;border:2px solid white;border-radius:10px;font:bold 22px Arial;cursor:pointer;margin:8px">PLAY AGAIN</button>
+      <button id="go-quit" style="padding:15px 40px;background:#444;color:white;border:2px solid white;border-radius:10px;font:bold 22px Arial;cursor:pointer;margin:8px">QUIT</button>
+    `;
+    document.body.appendChild(overlay);
+
+    document.getElementById('go-retry')!.addEventListener('click', () => {
+      overlay.remove();
+      this.shutdown();
+      this.scene.restart();
+    });
+    document.getElementById('go-quit')!.addEventListener('click', () => {
+      overlay.remove();
+      this.shutdown();
+      this.scene.start('TitleScene');
+    });
+  }
+
+  private showVictory(): void {
+    cancelAnimationFrame(this.animFrameId);
+    if (document.pointerLockElement) document.exitPointerLock();
+
+    // Award bonus for winning
+    this.coinsEarned += 1000;
+    const totalCoins = addCoins(this.coinsEarned);
+
+    const overlay = document.createElement('div');
+    overlay.id = 'game-over';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999';
+    overlay.innerHTML = `
+      <div style="color:#44ff44;font:bold 72px Arial;text-shadow:0 0 20px #00ff00,0 0 40px #00aa00;margin-bottom:20px">VICTORY!</div>
+      <div style="color:#cccccc;font:24px Arial;margin-bottom:20px">You defeated the bear!</div>
+      <div style="color:#ffdd00;font:bold 32px Arial;text-shadow:0 0 10px #ffaa00;margin-bottom:8px">+${this.coinsEarned} coins!</div>
+      <div style="color:#ffdd00;font:16px Arial;margin-bottom:30px">Total: ${totalCoins} coins</div>
+      <button id="go-retry" style="padding:15px 40px;background:#44aa44;color:white;border:2px solid white;border-radius:10px;font:bold 22px Arial;cursor:pointer;margin:8px">PLAY AGAIN</button>
       <button id="go-quit" style="padding:15px 40px;background:#444;color:white;border:2px solid white;border-radius:10px;font:bold 22px Arial;cursor:pointer;margin:8px">QUIT</button>
     `;
     document.body.appendChild(overlay);
@@ -4147,5 +5273,317 @@ export class BattleScene extends Phaser.Scene {
     if (hud) hud.remove();
     // Show Phaser canvas again
     this.game.canvas.style.display = '';
+    // Clean up network handler
+    if (this.messageHandler) {
+      this.network?.removeHandler(this.messageHandler);
+      this.messageHandler = null;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════
+  // ── MULTIPLAYER METHODS ──
+  // ══════════════════════════════════════════════════════
+
+  private setupMultiplayer(): void {
+    this.network = NetworkManager.getInstance();
+    this.remotePlayers = new Map();
+
+    this.messageHandler = (msg: GameMessage, senderId: string) => {
+      if (senderId === this.network.playerId) return; // ignore own messages
+      this.handleNetworkMessage(msg, senderId);
+    };
+    this.network.onMessage(this.messageHandler);
+
+    // Create models for all remote players from lobby
+    for (const p of this.multiplayerPlayers) {
+      if (p.id === this.network.playerId) continue;
+      this.createRemotePlayer(p);
+    }
+  }
+
+  private handleNetworkMessage(msg: GameMessage, senderId: string): void {
+    switch (msg.type) {
+      case 'POSITION_UPDATE': {
+        let rp = this.remotePlayers.get(msg.playerId);
+        if (!rp) {
+          // Late joiner — create their model
+          this.createRemotePlayer({ id: msg.playerId, name: msg.playerId.slice(0, 8), characterKey: 'char-0' });
+          rp = this.remotePlayers.get(msg.playerId);
+        }
+        if (rp && !rp.dead) {
+          rp.targetX = msg.x;
+          rp.targetY = msg.y;
+          rp.targetZ = msg.z;
+          rp.targetRotY = msg.rotY;
+          rp.speed = msg.speed;
+          rp.hp = msg.hp;
+        }
+        break;
+      }
+      case 'SHOOT': {
+        // Spawn a bullet from the remote player
+        const geo = new THREE.SphereGeometry(0.1, 4, 4);
+        const mat = new THREE.MeshStandardMaterial({ color: 0xff6600, emissive: 0xff4400, emissiveIntensity: 1.5 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(msg.x, msg.y, msg.z);
+        this.scene3d.add(mesh);
+        this.bullets.push({
+          mesh,
+          vx: msg.vx, vy: msg.vy, vz: msg.vz,
+          life: 2,
+          damage: msg.damage,
+          owner: -2, // remote player bullet (not NPC, not local)
+        });
+        this.playSfx('shoot', 0.2);
+        break;
+      }
+      case 'PLAYER_HIT': {
+        // Another player says we got hit
+        if (msg.targetId === this.network.playerId) {
+          this.playerHP = Math.max(0, this.playerHP - msg.damage * 5);
+          this.playSfx('hurt', 0.5);
+          if (this.hpText) this.hpText.textContent = `HP: ${this.playerHP}`;
+          if (this.playerHP <= 0) {
+            this.network.send({ type: 'PLAYER_DEAD', playerId: this.network.playerId });
+            this.showGameOver('KILLED BY A PLAYER');
+          }
+        }
+        break;
+      }
+      case 'PLAYER_DEAD': {
+        const rp = this.remotePlayers.get(msg.playerId);
+        if (rp) {
+          rp.dead = true;
+          this.coinsEarned += 1000;
+          this.showPickupMsg('+1000 coins! Player eliminated!');
+          this.spawnDeathFluff(rp.model.position.clone());
+          this.scene3d.remove(rp.model);
+        }
+        break;
+      }
+      case 'PLAYER_LEFT': {
+        const rp = this.remotePlayers.get(msg.playerId);
+        if (rp) {
+          this.scene3d.remove(rp.model);
+          this.remotePlayers.delete(msg.playerId);
+        }
+        break;
+      }
+    }
+  }
+
+  private createRemotePlayer(info: PlayerInfo): void {
+    // Reuse NPC model builder but with unique color based on player id
+    const colorIndex = Math.abs(info.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % CHAR_COLORS.length;
+    const visuals = CHAR_VISUALS[colorIndex % CHAR_VISUALS.length];
+
+    const shirtMat = new THREE.MeshStandardMaterial({ color: visuals.shirt, roughness: 0.8 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: visuals.skin, roughness: 0.6, metalness: 0.05 });
+    const pantsMat = new THREE.MeshStandardMaterial({ color: visuals.pants, roughness: 0.85 });
+    const shoeMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5, metalness: 0.1 });
+
+    const root = new THREE.Group();
+
+    // Hips
+    const hips = new THREE.Group();
+    hips.position.y = 0.95;
+    root.add(hips);
+    hips.add(new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.08, 0.28), new THREE.MeshStandardMaterial({ color: 0x3a2010 })));
+
+    // Torso
+    const torso = new THREE.Group();
+    torso.position.y = 0.05;
+    hips.add(torso);
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.55, 0.3), shirtMat);
+    chest.position.y = 0.3;
+    chest.castShadow = true;
+    torso.add(chest);
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.1, 8), skinMat);
+    neck.position.y = 0.6;
+    torso.add(neck);
+
+    // Head — simplified
+    const headGroup = new THREE.Group();
+    const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.38, 0.32), skinMat);
+    headMesh.castShadow = true;
+    headGroup.add(headMesh);
+    // Eyes
+    const eyeMat = new THREE.MeshStandardMaterial({ color: visuals.eye });
+    for (const side of [-0.08, 0.08]) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), eyeMat);
+      eye.position.set(side, 0.04, 0.17);
+      headGroup.add(eye);
+    }
+    // Hair
+    const hair = new THREE.Mesh(new THREE.BoxGeometry(0.37, 0.15, 0.34), new THREE.MeshStandardMaterial({ color: visuals.hair }));
+    hair.position.y = 0.2;
+    headGroup.add(hair);
+    headGroup.position.y = 0.72;
+    torso.add(headGroup);
+
+    // Arms
+    const leftUpperArm = new THREE.Group();
+    leftUpperArm.position.set(-0.3, 0.48, 0);
+    torso.add(leftUpperArm);
+    leftUpperArm.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.14), shirtMat), { position: new THREE.Vector3(0, -0.14, 0) }));
+    const leftForearm = new THREE.Group();
+    leftForearm.position.y = -0.28;
+    leftUpperArm.add(leftForearm);
+    leftForearm.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.25, 0.12), skinMat), { position: new THREE.Vector3(0, -0.12, 0) }));
+
+    const rightUpperArm = new THREE.Group();
+    rightUpperArm.position.set(0.3, 0.48, 0);
+    torso.add(rightUpperArm);
+    rightUpperArm.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.14), shirtMat), { position: new THREE.Vector3(0, -0.14, 0) }));
+    const rightForearm = new THREE.Group();
+    rightForearm.position.y = -0.28;
+    rightUpperArm.add(rightForearm);
+    rightForearm.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.25, 0.12), skinMat), { position: new THREE.Vector3(0, -0.12, 0) }));
+
+    // Legs
+    const leftThigh = new THREE.Group();
+    leftThigh.position.set(-0.12, -0.05, 0);
+    hips.add(leftThigh);
+    leftThigh.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.3, 0.16), pantsMat), { position: new THREE.Vector3(0, -0.15, 0) }));
+    const leftShin = new THREE.Group();
+    leftShin.position.y = -0.3;
+    leftThigh.add(leftShin);
+    leftShin.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 0.14), pantsMat), { position: new THREE.Vector3(0, -0.16, 0) }));
+    leftShin.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.28), shoeMat), { position: new THREE.Vector3(0, -0.35, 0.04) }));
+
+    const rightThigh = new THREE.Group();
+    rightThigh.position.set(0.12, -0.05, 0);
+    hips.add(rightThigh);
+    rightThigh.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.3, 0.16), pantsMat), { position: new THREE.Vector3(0, -0.15, 0) }));
+    const rightShin = new THREE.Group();
+    rightShin.position.y = -0.3;
+    rightThigh.add(rightShin);
+    rightShin.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 0.14), pantsMat), { position: new THREE.Vector3(0, -0.16, 0) }));
+    rightShin.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.28), shoeMat), { position: new THREE.Vector3(0, -0.35, 0.04) }));
+
+    // Shadow
+    const shadow = new THREE.Mesh(
+      new THREE.CircleGeometry(0.35, 12),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 })
+    );
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.y = 0.01;
+    root.add(shadow);
+
+    // Health bar
+    const hb = this.createHealthBarSprite();
+    hb.sprite.position.set(0, 2.5, 0);
+    root.add(hb.sprite);
+
+    // Name label above head
+    const nameCanvas = document.createElement('canvas');
+    nameCanvas.width = 256;
+    nameCanvas.height = 64;
+    const nCtx = nameCanvas.getContext('2d')!;
+    nCtx.fillStyle = 'rgba(0,0,0,0.5)';
+    nCtx.fillRect(0, 0, 256, 64);
+    nCtx.font = 'bold 28px Arial';
+    nCtx.fillStyle = '#ffffff';
+    nCtx.textAlign = 'center';
+    nCtx.fillText(info.name.slice(0, 16), 128, 42);
+    const nameTex = new THREE.CanvasTexture(nameCanvas);
+    const nameMat = new THREE.SpriteMaterial({ map: nameTex, transparent: true });
+    const nameSprite = new THREE.Sprite(nameMat);
+    nameSprite.scale.set(2, 0.5, 1);
+    nameSprite.position.set(0, 2.9, 0);
+    root.add(nameSprite);
+
+    // Place at random starting position
+    const x = (Math.random() - 0.5) * 400;
+    const z = (Math.random() - 0.5) * 400;
+    root.position.set(x, 0, z);
+    this.scene3d.add(root);
+
+    this.remotePlayers.set(info.id, {
+      model: root,
+      targetX: x, targetY: 0, targetZ: z,
+      targetRotY: 0,
+      speed: 0,
+      hp: 100,
+      dead: false,
+      healthBar: hb.sprite,
+      healthCtx: hb.ctx,
+      healthTex: hb.texture,
+      hips, torso, head: headGroup,
+      leftUpperArm, leftForearm,
+      rightUpperArm, rightForearm,
+      leftThigh, leftShin,
+      rightThigh, rightShin,
+      phase: 0,
+      nameSprite,
+    });
+  }
+
+  private updateMultiplayer(dt: number): void {
+    // Send own position at ~15 updates/sec
+    this.networkSendTimer -= dt;
+    if (this.networkSendTimer <= 0) {
+      this.networkSendTimer = 1 / 15;
+      const speed = Math.sqrt(this.moveDir.x * this.moveDir.x + this.moveDir.z * this.moveDir.z);
+      this.network.send({
+        type: 'POSITION_UPDATE',
+        playerId: this.network.playerId,
+        x: this.playerPos.x,
+        y: this.playerPos.y,
+        z: this.playerPos.z,
+        rotY: this.lookAngle,
+        speed,
+        hp: this.playerHP,
+        gun: this.playerGun,
+      });
+    }
+
+    // Interpolate remote player positions
+    for (const [_pid, rp] of this.remotePlayers) {
+      if (rp.dead) continue;
+
+      // Smooth interpolation
+      const lerpSpeed = 10 * dt;
+      rp.model.position.x += (rp.targetX - rp.model.position.x) * lerpSpeed;
+      rp.model.position.y += (rp.targetY - rp.model.position.y) * lerpSpeed;
+      rp.model.position.z += (rp.targetZ - rp.model.position.z) * lerpSpeed;
+
+      // Smooth rotation
+      let dRot = rp.targetRotY - rp.model.rotation.y;
+      while (dRot > Math.PI) dRot -= Math.PI * 2;
+      while (dRot < -Math.PI) dRot += Math.PI * 2;
+      rp.model.rotation.y += dRot * lerpSpeed;
+
+      // Walk animation based on speed
+      if (rp.speed > 0.1) {
+        rp.phase += dt * rp.speed * 8;
+        const swing = Math.sin(rp.phase) * 0.5;
+        rp.leftThigh.rotation.x = swing;
+        rp.rightThigh.rotation.x = -swing;
+        rp.leftShin.rotation.x = Math.max(0, -swing) * 0.5;
+        rp.rightShin.rotation.x = Math.max(0, swing) * 0.5;
+        rp.leftUpperArm.rotation.x = -swing * 0.6;
+        rp.rightUpperArm.rotation.x = swing * 0.6;
+      } else {
+        rp.leftThigh.rotation.x = 0;
+        rp.rightThigh.rotation.x = 0;
+        rp.leftShin.rotation.x = 0;
+        rp.rightShin.rotation.x = 0;
+        rp.leftUpperArm.rotation.x = 0;
+        rp.rightUpperArm.rotation.x = 0;
+      }
+
+      // Update health bar
+      this.updateHealthBar(rp.healthCtx, rp.healthTex, rp.hp, 100);
+      rp.healthBar.lookAt(this.camera.position);
+      rp.nameSprite.lookAt(this.camera.position);
+    }
+
+    // Update alive count to include remote players
+    const remoteAlive = [...this.remotePlayers.values()].filter(r => !r.dead).length;
+    if (this.aliveText && remoteAlive > 0) {
+      const npcAlive = this.npcs.filter(n => !n.dead).length;
+      this.aliveText.textContent = `Players: ${remoteAlive} | Bots: ${npcAlive}`;
+    }
   }
 }
