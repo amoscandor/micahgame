@@ -992,8 +992,6 @@ export class CharacterCreatorScene extends Phaser.Scene {
       shirtColor: this.shirtColor,
       pantsColor: this.pantsColor,
       hatColor: HAT_OPTIONS[this.selectedHat],
-      shirtLabel: this.shirtLabelDataUrl || undefined,
-      shirtBrand: this.selectedBrand || undefined,
     };
 
     const saved = this.getSavedCustomCharacters();

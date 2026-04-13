@@ -10,10 +10,14 @@ import { BossScene } from './scenes/BossScene';
 import { GameOverScene } from './scenes/GameOverScene';
 import { CharacterCreatorScene } from './scenes/CharacterCreatorScene';
 import { CharacterShopScene } from './scenes/CharacterShopScene';
+import { ShopHubScene } from './scenes/ShopHubScene';
+import { ArmorShopScene } from './scenes/ArmorShopScene';
+import { SettingsScene } from './scenes/SettingsScene';
+import { DrawOnSkinScene } from './scenes/DrawOnSkinScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   ...gameConfig,
-  scene: [BootScene, TitleScene, CharacterSelectScene, ModeSelectScene, LobbyScene, BattleScene, BossScene, GameOverScene, CharacterCreatorScene, CharacterShopScene],
+  scene: [BootScene, TitleScene, CharacterSelectScene, ModeSelectScene, LobbyScene, BattleScene, BossScene, GameOverScene, CharacterCreatorScene, CharacterShopScene, ShopHubScene, ArmorShopScene, SettingsScene, DrawOnSkinScene],
 };
 
 new Phaser.Game(config);

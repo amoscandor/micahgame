@@ -44,6 +44,27 @@ export class CharacterSelectScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Add drawn skin to character list if it exists
+    const drawnThumb = localStorage.getItem('fighting-wars-skin-thumb');
+    const drawnName = localStorage.getItem('fighting-wars-skin-name') || 'My Skin';
+    const drawnKey = 'char-drawn-skin';
+    // Remove old drawn skin entry if exists, then add fresh one
+    const drawnIdx = CHARACTERS.findIndex(c => c.key === drawnKey);
+    if (drawnIdx >= 0) CHARACTERS.splice(drawnIdx, 1);
+    if (drawnThumb) {
+      // Load thumbnail as a Phaser texture
+      if (this.textures.exists(drawnKey)) this.textures.remove(drawnKey);
+      const img = new Image();
+      img.src = drawnThumb;
+      img.onload = () => {
+        if (!this.textures.exists(drawnKey)) {
+          this.textures.addImage(drawnKey, img);
+        }
+      };
+      // Add to start of character list
+      CHARACTERS.unshift({ key: drawnKey, name: drawnName, gender: 'boy' });
+    }
+
     // Forest background with dark overlay
     this.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'forest-bg')
       .setDisplaySize(GAME_WIDTH, GAME_HEIGHT);
@@ -125,7 +146,7 @@ export class CharacterSelectScene extends Phaser.Scene {
         });
       });
 
-    // "BUY CHARACTER" button (right of MAKE YOUR OWN)
+    // "SHOP" button (right of MAKE YOUR OWN)
     const shopX = 245;
     const shopY = 330;
     const shopBg = this.add.graphics();
@@ -135,7 +156,7 @@ export class CharacterSelectScene extends Phaser.Scene {
     shopBg.fillRoundedRect(shopX - 60, shopY - 12, 120, 22, 5);
     shopBg.fillStyle(0xffcc44, 0.4);
     shopBg.fillRoundedRect(shopX - 56, shopY - 10, 112, 10, 3);
-    this.add.text(shopX, shopY - 1, 'BUY CHARACTER', {
+    this.add.text(shopX, shopY - 1, 'SHOP', {
       fontSize: '10px',
       fontFamily: 'Arial Black, sans-serif',
       color: '#000000',
@@ -143,9 +164,36 @@ export class CharacterSelectScene extends Phaser.Scene {
     this.add.rectangle(shopX, shopY, 130, 28, 0x000000, 0)
       .setInteractive({ useHandCursor: true }).setDepth(100)
       .on('pointerdown', () => {
+        // Save current selection so Draw On Skin knows which character to use
+        const selected = CHARACTERS[this.selectedIndex];
+        localStorage.setItem('selectedCharKey', selected.key);
         this.cameras.main.fadeOut(300, 0, 0, 0);
         this.time.delayedCall(300, () => {
-          this.scene.start('CharacterShopScene');
+          this.scene.start('ShopHubScene');
+        });
+      });
+
+    // "SETTINGS" button — between character grid and preview, at top
+    const setX = GAME_WIDTH / 2 + 60;
+    const setY = 50;
+    const setBg = this.add.graphics();
+    setBg.fillStyle(0x000000, 0.3);
+    setBg.fillRoundedRect(setX - 90, setY - 18, 180, 36, 8);
+    setBg.fillStyle(0x666666);
+    setBg.fillRoundedRect(setX - 88, setY - 17, 176, 34, 7);
+    setBg.fillStyle(0x888888, 0.4);
+    setBg.fillRoundedRect(setX - 82, setY - 14, 164, 16, 4);
+    this.add.text(setX, setY, '⚙ SETTINGS', {
+      fontSize: '16px',
+      fontFamily: 'Arial Black, sans-serif',
+      color: '#ffffff',
+    }).setOrigin(0.5);
+    this.add.rectangle(setX, setY, 186, 40, 0x000000, 0)
+      .setInteractive({ useHandCursor: true }).setDepth(100)
+      .on('pointerdown', () => {
+        this.cameras.main.fadeOut(300, 0, 0, 0);
+        this.time.delayedCall(300, () => {
+          this.scene.start('SettingsScene');
         });
       });
 
@@ -231,6 +279,7 @@ export class CharacterSelectScene extends Phaser.Scene {
 
     playHit.once('pointerdown', () => {
       const selected = CHARACTERS[this.selectedIndex];
+      localStorage.setItem('selectedCharKey', selected.key);
       this.cameras.main.fadeOut(400, 0, 0, 0);
       this.time.delayedCall(400, () => {
         this.scene.start('ModeSelectScene', {

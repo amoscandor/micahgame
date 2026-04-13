@@ -76,16 +76,16 @@ export class CharacterShopScene extends Phaser.Scene {
     const previewX = 340;
     const previewY = 160;
 
-    // Placeholder preview
+    // Placeholder preview — big and clear
     this.previewImage = this.add.image(previewX, previewY, '__missing')
       .setDisplaySize(10, 10).setVisible(false);
 
-    this.previewName = this.add.text(previewX, previewY + 75, '', {
+    this.previewName = this.add.text(previewX, previewY + 80, '', {
       fontSize: '16px', fontFamily: 'Arial Black', color: '#ffffff',
       stroke: '#000', strokeThickness: 3,
     }).setOrigin(0.5);
 
-    this.priceText = this.add.text(previewX, previewY + 95, '', {
+    this.priceText = this.add.text(previewX, previewY + 100, '', {
       fontSize: '13px', fontFamily: 'Arial Black', color: '#ffdd00',
       stroke: '#000', strokeThickness: 2,
     }).setOrigin(0.5);
@@ -330,11 +330,13 @@ export class CharacterShopScene extends Phaser.Scene {
   }
 
   private render3DPortrait(skin: number, hair: number, shirt: number, pants: number, hatColor: number = -1, charId?: string): HTMLCanvasElement {
-    const S = 512;
+    const S = 1024;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(1);
     renderer.setSize(S, S);
     renderer.setClearColor(0x000000, 0);
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 50);
@@ -355,26 +357,17 @@ export class CharacterShopScene extends Phaser.Scene {
     // Get pixel textures if available
     const pixTex = charId ? getCharacterTextures(charId) : null;
 
-    const makeMat = (color: number, texCanvas?: HTMLCanvasElement) => {
-      if (texCanvas) {
-        const tex = new THREE.CanvasTexture(texCanvas);
-        tex.magFilter = THREE.NearestFilter;
-        tex.minFilter = THREE.NearestFilter;
-        return new THREE.MeshStandardMaterial({ map: tex });
-      }
-      return new THREE.MeshStandardMaterial({ color });
-    };
-
-    const shirtMat = makeMat(shirt, pixTex?.chest);
-    const skinMat = makeMat(skin, pixTex?.head);
-    const pantsMat = new THREE.MeshStandardMaterial({ color: pants });
-    const shoeMat = makeMat(0x1a1a1a, pixTex?.shoe);
+    // Smooth materials — no pixel textures
+    const shirtMat = new THREE.MeshStandardMaterial({ color: shirt, roughness: 0.7 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.5, metalness: 0.05 });
+    const pantsMat = new THREE.MeshStandardMaterial({ color: pants, roughness: 0.8 });
+    const shoeMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.4, metalness: 0.1 });
     const hairMat = new THREE.MeshStandardMaterial({ color: hair, roughness: 0.9 });
-    const armLMat = makeMat(shirt, pixTex?.armL);
-    const armRMat = makeMat(shirt, pixTex?.armR);
-    const legLMat = makeMat(pants, pixTex?.legL);
-    const legRMat = makeMat(pants, pixTex?.legR);
-    const headMat = makeMat(skin, pixTex?.head);
+    const armLMat = shirtMat;
+    const armRMat = shirtMat;
+    const legLMat = pantsMat;
+    const legRMat = pantsMat;
+    const headMat = skinMat;
 
     const root = new THREE.Group();
     const hips = new THREE.Group();

@@ -4,6 +4,7 @@ import { WEAPONS } from '../config/game.config';
 import { NetworkManager } from '../network/NetworkManager';
 import { GameMessage, PlayerInfo } from '../network/MessageTypes';
 import { addCoins, getCoins } from '../utils/coinStore';
+import { ARMOR_ITEMS, getEquippedArmor } from './ArmorShopScene';
 
 // 3D character colors — matches character select
 const CHAR_COLORS = [
@@ -15,7 +16,7 @@ const CHAR_COLORS = [
 ];
 
 // Per-character visual colors: shirt, skin, pants, hair, eyeColor
-const CHAR_VISUALS: { shirt: number; skin: number; pants: number; hair: number; eye: number }[] = [
+export const CHAR_VISUALS: { shirt: number; skin: number; pants: number; hair: number; eye: number }[] = [
   // Boys
   { shirt: 0x1a1a2e, skin: 0xc49a6c, pants: 0x101018, hair: 0x0e0e0e, eye: 0x4a5a3a },  // Jake
   { shirt: 0xcc3300, skin: 0x8a5a3a, pants: 0x551800, hair: 0x1a1008, eye: 0x5a3a1a },  // Marcus
@@ -52,10 +53,12 @@ export class BattleScene extends Phaser.Scene {
   private lookAngle = 0;
   private lookPitch = 0;
   private playerPos = new THREE.Vector3(0, 0, 0);
+  private fountainParts: { waters: THREE.Mesh[]; spout: THREE.Mesh | null; spray: THREE.Mesh | null; jets: THREE.Mesh[]; foams: THREE.Mesh[]; droplets: { mesh: THREE.Mesh; vel: THREE.Vector3; startY: number; endY: number; cx: number; cz: number }[] } = { waters: [], spout: null, spray: null, jets: [], foams: [], droplets: [] };
   private playerModel!: THREE.Group;
   private playerPhase = 0;
   private playerSpeed = 0;
   private playerHP = 100;
+  private playerMaxHP = 100;
   private coinsEarned = 0;
   private carBtn: HTMLDivElement | null = null;
   private playerGun = 'None';
@@ -117,6 +120,15 @@ export class BattleScene extends Phaser.Scene {
   private cars: { mesh: THREE.Group; vx: number; vz: number; speed: number; driver: 'none' | 'player' | number; legPivots?: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[]; armPivots?: THREE.Group[]; tailPivots?: THREE.Group[]; jawPivot?: THREE.Group; neckBase?: THREE.Group; neckMid?: THREE.Group; bodyGroup?: THREE.Group; runPhase?: number }[] = [];
   private playerInCar: number = -1; // index of car player is driving, -1 = on foot
 
+  // T-Rex eat animation
+  private trexEatAnim: {
+    active: boolean;
+    timer: number;
+    phase: 'jump' | 'chomp' | 'swallow';
+    trexIndex: number;
+    startY: number;
+    damage: number;
+  } = { active: false, timer: 0, phase: 'jump', trexIndex: -1, startY: 0, damage: 40 };
 
   // Bear Boss
   private boss!: THREE.Group;
@@ -175,6 +187,8 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private gameMode = 'players-first';
+  private introCamera = true; // start facing the player, transition to behind on first move
+  private introCameraTimer = 0;
 
   init(data: { characterKey?: string; characterName?: string; mode?: string; opponent?: string; multiplayerPlayers?: PlayerInfo[] }): void {
     if (data.characterKey) this.selectedCharKey = data.characterKey;
@@ -188,8 +202,15 @@ export class BattleScene extends Phaser.Scene {
     // Bake sound effects
     this.bakeSounds();
 
-    // Reset state for new game
-    this.playerHP = 100;
+    // Reset state for new game — load equipped armor for bonus HP
+    const equippedArmorIds = getEquippedArmor();
+    let armorBonus = 0;
+    for (const id of equippedArmorIds) {
+      const item = ARMOR_ITEMS.find(a => a.id === id);
+      if (item) armorBonus += item.protection;
+    }
+    this.playerMaxHP = 100 + armorBonus;
+    this.playerHP = this.playerMaxHP;
     this.playerGun = 'None';
     this.playerPos.set(0, 0, 0);
     this.lookAngle = 0;
@@ -444,6 +465,9 @@ export class BattleScene extends Phaser.Scene {
     // === TREES (more, wilder) ===
     this.createTrees();
 
+    // === EIFFEL TOWER at center ===
+    this.createEiffelTower();
+
     // === ROCKS ===
     this.createRocks();
 
@@ -472,14 +496,7 @@ export class BattleScene extends Phaser.Scene {
     this.createCars();
 
     // === 3D NPCs scattered around ===
-    if (this.gameMode === 'boss-first') {
-      // Boss spawns immediately in boss-first mode
-      this.bossSpawned = true;
-      this.createBearBoss();
-    } else {
-      // Fewer bots in multiplayer since real players fill slots
-      this.createNPCs(this.isMultiplayer ? 20 : 50);
-    }
+    this.createNPCs(this.isMultiplayer ? 20 : 50);
 
     // === MULTIPLAYER: setup network + remote players ===
     if (this.isMultiplayer) {
@@ -611,8 +628,8 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
-    // Draw T-Rexes as small green dots
-    ctx.fillStyle = '#4a6a2a';
+    // Draw T-Rexes as small brown dots
+    ctx.fillStyle = '#8B4513';
     for (const car of this.cars) {
       const p = toMap(car.mesh.position.x, car.mesh.position.z);
       ctx.beginPath();
@@ -680,7 +697,7 @@ export class BattleScene extends Phaser.Scene {
       '<span style="color:#ddaa00">● Guns</span>',
       '<span style="color:#ff8800">● Pizza</span>',
       '<span style="color:#4488ff">● Bots</span>',
-      '<span style="color:#4a6a2a">● T-Rex</span>',
+      '<span style="color:#8B4513">● T-Rex</span>',
       '<span style="color:#4a2a0a">● Bear Boss</span>',
     ].join('');
     overlay.appendChild(legend);
@@ -738,7 +755,10 @@ export class BattleScene extends Phaser.Scene {
       const cx = Math.max(-450, Math.min(450, wx));
       const cz = Math.max(-450, Math.min(450, wz));
       overlay.remove();
-      this.startTRexRide(cx, cz, onLand);
+      // Place player directly at chosen spot — no T-Rex ride
+      this.playerPos.set(cx, this.getTerrainHeight(cx, cz), cz);
+      this.playerModel.position.set(cx, this.getTerrainHeight(cx, cz), cz);
+      onLand();
     };
 
     canvas.addEventListener('click', (e) => land(e.clientX, e.clientY));
@@ -878,6 +898,7 @@ export class BattleScene extends Phaser.Scene {
         bodyGroup.add(fold);
       }
     }
+
 
     // === NECK — multiple segments for realistic curve ===
     const neckBase = new THREE.Group();
@@ -1223,7 +1244,7 @@ export class BattleScene extends Phaser.Scene {
     }
 
     // Scale for presence
-    trex.scale.set(1.4, 1.4, 1.4);
+    trex.scale.set(3, 3, 3);
 
     // Start position — edge of map, facing toward landing spot
     const angle = Math.atan2(targetX, targetZ);
@@ -1386,8 +1407,8 @@ export class BattleScene extends Phaser.Scene {
       // Player rides on top — sitting
       this.playerPos.set(px, 0, pz);
       const seatBounce = Math.abs(Math.sin(runCycle)) * 0.15;
-      this.playerModel.position.set(px, 4.0 + seatBounce, pz);
-      this.playerModel.rotation.y = angle;
+      this.playerModel.position.set(px, 9.5 + seatBounce, pz);
+      this.playerModel.rotation.y = angle + Math.PI;
 
       // Legs dangle/swing slightly while sitting — lazy kick
       this.pLeftShin.rotation.x = 1.2 + Math.sin(rideTime * 1.5) * 0.25;
@@ -1396,14 +1417,14 @@ export class BattleScene extends Phaser.Scene {
       this.pLeftThigh.rotation.x = -1.4 + Math.sin(rideTime * 0.8) * 0.05;
       this.pRightThigh.rotation.x = -1.4 + Math.sin(rideTime * 0.8 + 1.5) * 0.05;
 
-      // Camera orbits around the T-Rex based on drag input
-      const camDist = 12;
-      const camHeight = 6 + camPitch * 6;
+      // Camera orbits around the T-Rex based on drag input — higher up to see rider
+      const camDist = 18;
+      const camHeight = 14 + camPitch * 6;
       const totalAngle = angle + Math.PI + camYaw; // behind the T-Rex + user offset
       const camX = px + Math.sin(totalAngle) * camDist;
       const camZ = pz + Math.cos(totalAngle) * camDist;
       this.camera.position.set(camX + shake, camHeight, camZ);
-      this.camera.lookAt(px, 2.5, pz);
+      this.camera.lookAt(px, 8, pz);
 
       // Dust particles on the ground
       if (Math.random() < 0.4) {
@@ -1486,12 +1507,13 @@ export class BattleScene extends Phaser.Scene {
       this.updateNPCs(dt);
       this.updateBullets(dt);
       this.updateCars(dt);
+      this.updateTRexEatAnim(dt);
       this.updateBearBoss(dt);
       if (this.isMultiplayer) this.updateMultiplayer(dt);
       if (this.shootCooldown > 0) this.shootCooldown -= dt;
       this.checkPickups();
       // Update health bars
-      this.updateHealthBar(this.playerHealthCtx, this.playerHealthTex, this.playerHP, 100);
+      this.updateHealthBar(this.playerHealthCtx, this.playerHealthTex, this.playerHP, this.playerMaxHP);
       for (const npc of this.npcs) {
         if (!npc.dead) {
           this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 2);
@@ -1505,28 +1527,558 @@ export class BattleScene extends Phaser.Scene {
       if (this.aliveText) {
         this.aliveText.textContent = this.bossSpawned && !this.bossDead ? 'BOSS FIGHT!' : `Alive: ${aliveCount}`;
       }
-      if (this.gameMode === 'boss-first') {
-        // In boss-first mode, spawn NPCs after boss is defeated
-        if (this.bossDead && this.npcs.length === 0) {
-          this.createNPCs(50);
-          this.showPickupMsg('BOTS INCOMING!');
-        }
-      } else {
-        // In players-first mode, spawn boss after all NPCs are dead
-        if (!this.bossSpawned && !this.bossDead && aliveCount === 0) {
-          this.bossSpawned = true;
-          this.createBearBoss();
-          this.showPickupMsg('THE BEAR HAS AWOKEN!');
-          this.playSfx('roar', 0.8);
-        }
+      // Win when all NPCs are dead
+      if (aliveCount === 0) {
+        this.showVictory();
       }
       if (!this.bossDead && this.bossSpawned && this.bossHealthBar) {
         this.updateHealthBar(this.bossHealthCtx, this.bossHealthTex, this.bossHP, this.bossMaxHP);
         this.bossHealthBar.lookAt(this.camera.position);
       }
+      // Animate fountain water
+      const ft = this.clock.elapsedTime;
+      const fp = this.fountainParts;
+      // Water surfaces ripple up and down
+      for (let i = 0; i < fp.waters.length; i++) {
+        const w = fp.waters[i];
+        const baseY = [1.15, 1.95, 8.25][i] ?? 1.15;
+        w.position.y = baseY + Math.sin(ft * 2 + i) * 0.04;
+        w.rotation.y = ft * 0.3 + i;
+      }
+      // Main spout pulses height
+      if (fp.spout) {
+        const pulse = 1 + Math.sin(ft * 3) * 0.15;
+        fp.spout.scale.y = pulse;
+        fp.spout.position.y = 13.3 + (pulse - 1) * 5;
+      }
+      // Spray wobbles
+      if (fp.spray) {
+        fp.spray.position.y = 19 + Math.sin(ft * 3) * 1.5;
+        fp.spray.scale.set(1 + Math.sin(ft * 4) * 0.2, 1, 1 + Math.cos(ft * 4) * 0.2);
+        fp.spray.rotation.y = ft * 2;
+      }
+      // Outer jets pulse at different phases
+      for (let j = 0; j < fp.jets.length; j++) {
+        const jet = fp.jets[j];
+        const phase = ft * 2.5 + j * 0.8;
+        const h = 1 + Math.sin(phase) * 0.4;
+        jet.scale.y = h;
+        jet.position.y = 2.7 + (h - 1) * 1.5;
+      }
+      // Falling water droplets
+      for (const d of fp.droplets) {
+        const fallDist = d.startY - d.endY;
+        const progress = Math.max(0, (d.startY - d.mesh.position.y) / fallDist);
+        const speed = 8 + progress * 12;
+        d.mesh.position.y -= dt * speed;
+        d.mesh.position.x += d.vel.x * dt;
+        d.mesh.position.z += d.vel.z * dt;
+        d.mesh.scale.y = 1 + progress * 3;
+        d.mesh.scale.x = 1 - progress * 0.4;
+        d.mesh.scale.z = 1 - progress * 0.4;
+        if (d.mesh.position.y <= d.endY) {
+          const a = Math.random() * Math.PI * 2;
+          const r = Math.random() * 2.5;
+          d.mesh.position.set(d.cx + Math.sin(a) * r, d.startY + Math.random() * 2, d.cz + Math.cos(a) * r);
+          d.mesh.scale.set(1, 1, 1);
+        }
+      }
+
       this.threeRenderer.render(this.scene3d, this.camera);
     };
     animate();
+  }
+
+  private createEiffelTower(): void {
+    // Silver metallic Eiffel Tower
+    const ironMat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, metalness: 0.85, roughness: 0.2, emissive: 0x111111, emissiveIntensity: 0.05 });
+    const darkIron = new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.9, roughness: 0.15, emissive: 0x0a0a0a, emissiveIntensity: 0.05 });
+    const concreteMat = new THREE.MeshStandardMaterial({ color: 0xb5a99a, roughness: 0.95 });
+    const tower = new THREE.Group();
+
+    // Total height ~100. Proportions inspired by the real tower:
+    // Base spread 15 each side (30 across), first floor y=25, second floor y=48, top y=68, spire to 100
+    const totalLegH = 68; // legs run from ground to top platform
+    const baseSpread = 15; // half-width at ground level
+
+    // Exponential-curve profile: spread(t) where t=0 is ground, t=1 is top of legs
+    // Real Eiffel uses an exponential; we approximate: spread = baseSpread * e^(-2.8*t)
+    const spreadAt = (t: number) => baseSpread * Math.exp(-2.8 * t);
+
+    // Helper: orient a cylinder between two 3D points
+    const makeCylSegment = (
+      p0: THREE.Vector3, p1: THREE.Vector3,
+      radiusBottom: number, radiusTop: number, mat: THREE.Material
+    ): THREE.Mesh => {
+      const dir = new THREE.Vector3().subVectors(p1, p0);
+      const len = dir.length();
+      const cyl = new THREE.Mesh(new THREE.CylinderGeometry(radiusTop, radiusBottom, len, 10), mat);
+      const mid = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
+      cyl.position.copy(mid);
+      // Orient: cylinder default axis is Y-up
+      const up = new THREE.Vector3(0, 1, 0);
+      const d = dir.clone().normalize();
+      const quat = new THREE.Quaternion().setFromUnitVectors(up, d);
+      cyl.quaternion.copy(quat);
+      cyl.castShadow = true;
+      return cyl;
+    };
+
+    // === FOUR CURVED LEGS ===
+    const legSegs = 20;
+    const legCorners: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    // Store points along each leg for connecting braces later
+    const legPoints: THREE.Vector3[][] = [[], [], [], []];
+
+    for (let ci = 0; ci < 4; ci++) {
+      const [sx, sz] = legCorners[ci];
+      for (let s = 0; s <= legSegs; s++) {
+        const t = s / legSegs;
+        const y = t * totalLegH;
+        const sp = spreadAt(t);
+        legPoints[ci].push(new THREE.Vector3(sx * sp, y, sz * sp));
+      }
+      // Draw cylinder segments along the curve
+      for (let s = 0; s < legSegs; s++) {
+        const t = s / legSegs;
+        const rBot = 1.8 * (1 - t * 0.7);
+        const rTop = 1.8 * (1 - (t + 1 / legSegs) * 0.7);
+        tower.add(makeCylSegment(legPoints[ci][s], legPoints[ci][s + 1], rBot, rTop, ironMat));
+      }
+    }
+
+    // === SMOOTH ARCHES between adjacent legs ===
+    // Arches span between each pair of adjacent legs at base, peaking ~20 units high
+    const archHeight = 20;
+    const archSegs = 16;
+    for (let face = 0; face < 4; face++) {
+      const c0 = legCorners[face];
+      const c1 = legCorners[(face + 1) % 4];
+      for (let i = 0; i < archSegs; i++) {
+        const a0 = (i / archSegs) * Math.PI;
+        const a1 = ((i + 1) / archSegs) * Math.PI;
+        // Parametric position along arch
+        const frac0 = i / archSegs;
+        const frac1 = (i + 1) / archSegs;
+        const sp0 = spreadAt(0);
+        const x0 = c0[0] * sp0 + (c1[0] * sp0 - c0[0] * sp0) * frac0;
+        const z0 = c0[1] * sp0 + (c1[1] * sp0 - c0[1] * sp0) * frac0;
+        const x1 = c0[0] * sp0 + (c1[0] * sp0 - c0[0] * sp0) * frac1;
+        const z1 = c0[1] * sp0 + (c1[1] * sp0 - c0[1] * sp0) * frac1;
+        const y0 = Math.sin(a0) * archHeight;
+        const y1 = Math.sin(a1) * archHeight;
+        const p0 = new THREE.Vector3(x0, y0, z0);
+        const p1 = new THREE.Vector3(x1, y1, z1);
+        tower.add(makeCylSegment(p0, p1, 0.6, 0.6, darkIron));
+      }
+    }
+
+    // === HORIZONTAL RING BRACES at key levels ===
+    const braceLevels = [5, 10, 15, 20, 25, 32, 40, 48, 55, 62];
+    for (const by of braceLevels) {
+      const t = by / totalLegH;
+      const sp = spreadAt(t);
+      // Connect adjacent legs with cylinders
+      for (let face = 0; face < 4; face++) {
+        const c0 = legCorners[face];
+        const c1 = legCorners[(face + 1) % 4];
+        const p0 = new THREE.Vector3(c0[0] * sp, by, c0[1] * sp);
+        const p1 = new THREE.Vector3(c1[0] * sp, by, c1[1] * sp);
+        tower.add(makeCylSegment(p0, p1, 0.3, 0.3, darkIron));
+      }
+    }
+
+    // === FIRST FLOOR PLATFORM (y=25) ===
+    const p1y = 25;
+    const p1sp = spreadAt(p1y / totalLegH);
+    const p1Size = p1sp * 2 + 3;
+    const platform1 = new THREE.Mesh(new THREE.CylinderGeometry(p1Size / 2 + 1, p1Size / 2 + 1, 1.0, 4), darkIron);
+    platform1.position.y = p1y;
+    platform1.rotation.y = Math.PI / 4;
+    tower.add(platform1);
+    // Railing posts
+    for (let a = 0; a < 16; a++) {
+      const angle = (a / 16) * Math.PI * 2;
+      const r = p1Size / 2 + 0.5;
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 2.0, 6), darkIron);
+      post.position.set(Math.cos(angle) * r, p1y + 1.5, Math.sin(angle) * r);
+      tower.add(post);
+    }
+    // Top rail ring (torus)
+    const rail1 = new THREE.Mesh(new THREE.TorusGeometry(p1Size / 2 + 0.5, 0.12, 6, 24), darkIron);
+    rail1.position.y = p1y + 2.5;
+    rail1.rotation.x = Math.PI / 2;
+    tower.add(rail1);
+
+    // === SECOND FLOOR PLATFORM (y=48) ===
+    const p2y = 48;
+    const p2sp = spreadAt(p2y / totalLegH);
+    const p2Size = p2sp * 2 + 2;
+    const platform2 = new THREE.Mesh(new THREE.CylinderGeometry(p2Size / 2 + 0.5, p2Size / 2 + 0.5, 0.8, 4), darkIron);
+    platform2.position.y = p2y;
+    platform2.rotation.y = Math.PI / 4;
+    tower.add(platform2);
+    // Railing
+    for (let a = 0; a < 12; a++) {
+      const angle = (a / 12) * Math.PI * 2;
+      const r = p2Size / 2 + 0.3;
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.5, 6), darkIron);
+      post.position.set(Math.cos(angle) * r, p2y + 1.2, Math.sin(angle) * r);
+      tower.add(post);
+    }
+    const rail2 = new THREE.Mesh(new THREE.TorusGeometry(p2Size / 2 + 0.3, 0.1, 6, 20), darkIron);
+    rail2.position.y = p2y + 2.0;
+    rail2.rotation.x = Math.PI / 2;
+    tower.add(rail2);
+
+    // === TOP PLATFORM (y=68) ===
+    const topY = 68;
+    const topPlatform = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 4.0, 1.0, 8), darkIron);
+    topPlatform.position.y = topY;
+    tower.add(topPlatform);
+    // Observation room - octagonal prism
+    const obsRoom = new THREE.Mesh(new THREE.CylinderGeometry(2.8, 2.8, 3.0, 8), ironMat);
+    obsRoom.position.y = topY + 2.0;
+    tower.add(obsRoom);
+    // Window band
+    const windowMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, transparent: true, opacity: 0.4, metalness: 0.3 });
+    const windowRing = new THREE.Mesh(new THREE.TorusGeometry(2.85, 0.6, 4, 8), windowMat);
+    windowRing.position.y = topY + 2.0;
+    windowRing.rotation.x = Math.PI / 2;
+    tower.add(windowRing);
+
+    // === UPPER SHAFT — tapering cylinder columns from platform2 to top ===
+    const shaftBot = p2y + 1;
+    const shaftTop = topY;
+    const shaftSegs = 10;
+    for (const [cx, cz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      for (let s = 0; s < shaftSegs; s++) {
+        const t0 = s / shaftSegs;
+        const t1 = (s + 1) / shaftSegs;
+        const y0 = shaftBot + t0 * (shaftTop - shaftBot);
+        const y1 = shaftBot + t1 * (shaftTop - shaftBot);
+        const r0 = 2.5 * (1 - t0 * 0.65);
+        const r1 = 2.5 * (1 - t1 * 0.65);
+        const p0 = new THREE.Vector3(cx * r0, y0, cz * r0);
+        const p1 = new THREE.Vector3(cx * r1, y1, cz * r1);
+        tower.add(makeCylSegment(p0, p1, 0.5 * (1 - t0 * 0.4), 0.5 * (1 - t1 * 0.4), ironMat));
+      }
+    }
+    // Horizontal rings on upper shaft
+    for (let i = 0; i <= 4; i++) {
+      const t = i / 4;
+      const y = shaftBot + t * (shaftTop - shaftBot);
+      const r = 2.5 * (1 - t * 0.65) + 0.2;
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.15, 6, 12), darkIron);
+      ring.position.y = y;
+      ring.rotation.x = Math.PI / 2;
+      tower.add(ring);
+    }
+
+    // === SPIRE (tapering from top platform to 100) ===
+    const spire1 = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 1.8, 10, 10), ironMat);
+    spire1.position.y = topY + 8.5;
+    spire1.castShadow = true;
+    tower.add(spire1);
+    const spire2 = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.6, 10, 10), ironMat);
+    spire2.position.y = topY + 18;
+    spire2.castShadow = true;
+    tower.add(spire2);
+    const spire3 = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.25, 8, 8), ironMat);
+    spire3.position.y = topY + 27;
+    spire3.castShadow = true;
+    tower.add(spire3);
+    // Antenna mast brackets
+    for (let a = 0; a < 4; a++) {
+      const angle = (a / 4) * Math.PI * 2;
+      const bracket = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3, 6), darkIron);
+      bracket.position.set(Math.cos(angle) * 1.0, topY + 7, Math.sin(angle) * 1.0);
+      bracket.rotation.z = Math.cos(angle) * 0.3;
+      bracket.rotation.x = Math.sin(angle) * 0.3;
+      tower.add(bracket);
+    }
+    // Golden tip
+    const beacon = new THREE.Mesh(
+      new THREE.SphereGeometry(0.4, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0xdaa520, emissive: 0xdaa520, emissiveIntensity: 0.6, metalness: 0.9 })
+    );
+    beacon.position.y = topY + 31.5;
+    tower.add(beacon);
+    const beaconLight = new THREE.PointLight(0xffcc66, 3, 50);
+    beaconLight.position.y = topY + 31.5;
+    tower.add(beaconLight);
+
+    // === GROUND BASE — concrete foundation pads ===
+    for (const [sx, sz] of legCorners) {
+      const sp = spreadAt(0);
+      const pad = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 4.0, 1.5, 8), concreteMat);
+      pad.position.set(sx * sp, 0.75, sz * sp);
+      tower.add(pad);
+    }
+    // Central plaza with path lines
+    const plaza = new THREE.Mesh(new THREE.CylinderGeometry(20, 20, 0.2, 32), concreteMat);
+    plaza.position.y = 0.1;
+    tower.add(plaza);
+    // Darker path ring
+    const pathRing = new THREE.Mesh(new THREE.TorusGeometry(16, 1.2, 4, 32),
+      new THREE.MeshStandardMaterial({ color: 0x8a7a6a, roughness: 0.95 }));
+    pathRing.rotation.x = Math.PI / 2;
+    pathRing.position.y = 0.15;
+    tower.add(pathRing);
+
+    // Warm golden up-lights around base (like real tower at night)
+    for (const [sx, sz] of legCorners) {
+      const sp = spreadAt(0);
+      const upLight = new THREE.SpotLight(0xffcc77, 3, 80, Math.PI / 6, 0.5);
+      upLight.position.set(sx * sp * 0.5, 1, sz * sp * 0.5);
+      upLight.target.position.set(sx * sp * 0.3, 40, sz * sp * 0.3);
+      tower.add(upLight);
+      tower.add(upLight.target);
+    }
+    // Central uplighting
+    const centerUp = new THREE.PointLight(0xffbb55, 1.5, 60);
+    centerUp.position.set(0, 2, 0);
+    tower.add(centerUp);
+
+    // === BEAUTIFUL FOUNTAIN in the center under the tower ===
+    const marbleMat = new THREE.MeshStandardMaterial({ color: 0xf0e8dd, roughness: 0.3, metalness: 0.05 });
+    const marbleDark = new THREE.MeshStandardMaterial({ color: 0xd8cfc0, roughness: 0.35, metalness: 0.08 });
+    const goldTrim = new THREE.MeshStandardMaterial({ color: 0xdaa520, metalness: 0.9, roughness: 0.1, emissive: 0x442200, emissiveIntensity: 0.15 });
+    const waterMat = new THREE.MeshStandardMaterial({ color: 0x3399cc, transparent: true, opacity: 0.55, metalness: 0.4, roughness: 0.05 });
+    const spoutMat = new THREE.MeshStandardMaterial({ color: 0x77ccee, transparent: true, opacity: 0.35, roughness: 0.02, metalness: 0.1 });
+
+    // === OUTER POOL — grand octagonal basin ===
+    const outerPool = new THREE.Mesh(new THREE.CylinderGeometry(8, 8.5, 1.2, 8), marbleMat);
+    outerPool.position.y = 0.6;
+    tower.add(outerPool);
+    // Water surface
+    const outerWater = new THREE.Mesh(new THREE.CylinderGeometry(7.5, 7.5, 0.08, 32), waterMat);
+    outerWater.position.y = 1.15;
+    tower.add(outerWater);
+    this.fountainParts.waters.push(outerWater);
+    // Gold rim
+    const outerRim = new THREE.Mesh(new THREE.TorusGeometry(8, 0.35, 8, 8), goldTrim);
+    outerRim.rotation.x = Math.PI / 2;
+    outerRim.position.y = 1.2;
+    tower.add(outerRim);
+
+    // === INNER RAISED POOL ===
+    const innerPool = new THREE.Mesh(new THREE.CylinderGeometry(4, 4.5, 0.8, 24), marbleDark);
+    innerPool.position.y = 1.6;
+    tower.add(innerPool);
+    const innerWater = new THREE.Mesh(new THREE.CylinderGeometry(3.8, 3.8, 0.06, 24), waterMat);
+    innerWater.position.y = 1.95;
+    tower.add(innerWater);
+    this.fountainParts.waters.push(innerWater);
+    const innerRim = new THREE.Mesh(new THREE.TorusGeometry(4, 0.2, 8, 24), goldTrim);
+    innerRim.rotation.x = Math.PI / 2;
+    innerRim.position.y = 2;
+    tower.add(innerRim);
+
+    // === CENTRAL PEDESTAL — ornate column ===
+    // Base
+    const pedBase = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 2.2, 0.8, 16), marbleMat);
+    pedBase.position.y = 2.4;
+    tower.add(pedBase);
+    // Column with fluting (multiple thin cylinders around)
+    const column = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.2, 4, 16), marbleMat);
+    column.position.y = 4.8;
+    tower.add(column);
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const flute = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.5, 4), marbleDark);
+      flute.position.set(Math.sin(a) * 1.15, 4.8, Math.cos(a) * 1.15);
+      tower.add(flute);
+    }
+    // Capital (top of column)
+    const capital = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.0, 0.6, 16), marbleMat);
+    capital.position.y = 7.2;
+    tower.add(capital);
+    // Gold band
+    const goldBand = new THREE.Mesh(new THREE.TorusGeometry(1.3, 0.1, 6, 16), goldTrim);
+    goldBand.rotation.x = Math.PI / 2;
+    goldBand.position.y = 7;
+    tower.add(goldBand);
+
+    // === TOP BOWL — scalloped ===
+    const topBowl = new THREE.Mesh(new THREE.CylinderGeometry(2.8, 1.4, 1.0, 12), marbleMat);
+    topBowl.position.y = 7.8;
+    tower.add(topBowl);
+    const topBowlWater = new THREE.Mesh(new THREE.CylinderGeometry(2.5, 2.5, 0.06, 16), waterMat);
+    topBowlWater.position.y = 8.25;
+    tower.add(topBowlWater);
+    this.fountainParts.waters.push(topBowlWater);
+    // Scalloped edge — small bumps around rim
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const scallop = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), marbleMat);
+      scallop.position.set(Math.sin(a) * 2.8, 8.3, Math.cos(a) * 2.8);
+      scallop.scale.set(1, 0.5, 1);
+      tower.add(scallop);
+    }
+    // Gold rim on top bowl
+    const topRim = new THREE.Mesh(new THREE.TorusGeometry(2.8, 0.12, 6, 24), goldTrim);
+    topRim.rotation.x = Math.PI / 2;
+    topRim.position.y = 8.35;
+    tower.add(topRim);
+
+    // === CENTRAL SPOUT — tall graceful water jet ===
+    const mainSpout = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.35, 10, 8), spoutMat);
+    mainSpout.position.y = 13.3;
+    tower.add(mainSpout);
+    this.fountainParts.spout = mainSpout;
+    // Spray at top — expanding cone
+    const spray = new THREE.Mesh(new THREE.ConeGeometry(1.5, 2, 12, 1, true), spoutMat);
+    spray.position.y = 19;
+    spray.rotation.x = Math.PI;
+    tower.add(spray);
+    this.fountainParts.spray = spray;
+
+    // === CASCADING STREAMS from top bowl to inner pool ===
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      // Graceful arcing stream
+      const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, 5, 6), spoutMat);
+      const sx = Math.sin(a) * 2.5;
+      const sz = Math.cos(a) * 2.5;
+      stream.position.set(sx * 0.8, 5.5, sz * 0.8);
+      stream.rotation.x = Math.cos(a) * 0.7;
+      stream.rotation.z = -Math.sin(a) * 0.7;
+      tower.add(stream);
+    }
+
+    // === OUTER RING JETS — 8 mini copies of the main spout (same shapes) ===
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const jx = Math.sin(a) * 6;
+      const jz = Math.cos(a) * 6;
+      // Gold nozzle at base
+      const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 0.15, 8), goldTrim);
+      nozzle.position.set(jx, 1.2, jz);
+      tower.add(nozzle);
+      // Mini spout cylinder — same shape as main spout (CylinderGeometry), just smaller
+      const jet = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, 3, 8), spoutMat);
+      jet.position.set(jx, 2.7, jz);
+      tower.add(jet);
+      this.fountainParts.jets.push(jet);
+      // Mini cone spray at top — SAME as main spray (ConeGeometry, upside down), just smaller
+      const miniSpray = new THREE.Mesh(new THREE.ConeGeometry(0.5, 0.7, 12, 1, true), spoutMat);
+      miniSpray.position.set(jx, 4.5, jz);
+      miniSpray.rotation.x = Math.PI;
+      tower.add(miniSpray);
+    }
+
+    // === DECORATIVE FIGURES — 4 cherub-like spheres on pedestal ===
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      const figGroup = new THREE.Group();
+      // Body
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), marbleMat);
+      body.scale.set(1, 1.3, 0.8);
+      figGroup.add(body);
+      // Head
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), marbleMat);
+      head.position.y = 0.5;
+      figGroup.add(head);
+      // Arms (holding vase)
+      for (const side of [-1, 1]) {
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.4, 4), marbleMat);
+        arm.position.set(side * 0.25, 0.2, 0.15);
+        arm.rotation.z = side * -0.5;
+        arm.rotation.x = -0.3;
+        figGroup.add(arm);
+      }
+      figGroup.position.set(Math.sin(a) * 1.6, 7.3, Math.cos(a) * 1.6);
+      figGroup.rotation.y = -a;
+      tower.add(figGroup);
+    }
+
+    // === SPLASH & FOAM around water landings ===
+    const foamMat = new THREE.MeshBasicMaterial({ color: 0xeeffff, transparent: true, opacity: 0.4 });
+    // Inner pool foam ring
+    for (let i = 0; i < 30; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 2 + Math.random() * 1.5;
+      const foam = new THREE.Mesh(new THREE.SphereGeometry(0.1 + Math.random() * 0.15, 4, 4), foamMat);
+      foam.position.set(Math.sin(a) * r, 2, Math.cos(a) * r);
+      tower.add(foam);
+    }
+    // Outer pool foam
+    for (let i = 0; i < 40; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 4 + Math.random() * 3;
+      const foam = new THREE.Mesh(new THREE.SphereGeometry(0.08 + Math.random() * 0.12, 4, 4), foamMat);
+      foam.position.set(Math.sin(a) * r, 1.2, Math.cos(a) * r);
+      tower.add(foam);
+    }
+
+    // === FALLING WATER DROPLETS ===
+    const dropMat = new THREE.MeshBasicMaterial({ color: 0x88ccee, transparent: true, opacity: 0.6 });
+    // Main spout — 500 drops
+    for (let i = 0; i < 500; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * 2.5;
+      const startY = 13 + Math.random() * 7;
+      const drop = new THREE.Mesh(new THREE.SphereGeometry(0.25, 4, 4), dropMat);
+      drop.position.set(Math.sin(a) * r, startY, Math.cos(a) * r);
+      tower.add(drop);
+      this.fountainParts.droplets.push({ mesh: drop, vel: new THREE.Vector3(Math.sin(a) * 0.6, 0, Math.cos(a) * 0.6), startY, endY: 8.3, cx: 0, cz: 0 });
+    }
+    // Top bowl overflow drops
+    for (let i = 0; i < 30; i++) {
+      const a = (i / 30) * Math.PI * 2 + Math.random() * 0.2;
+      const startY = 8.3 + Math.random() * 0.5;
+      const drop = new THREE.Mesh(new THREE.SphereGeometry(0.25, 4, 4), dropMat);
+      drop.position.set(Math.sin(a) * 2.8, startY, Math.cos(a) * 2.8);
+      tower.add(drop);
+      this.fountainParts.droplets.push({ mesh: drop, vel: new THREE.Vector3(Math.sin(a) * 0.4, 0, Math.cos(a) * 0.4), startY, endY: 2.0, cx: 0, cz: 0 });
+    }
+    // Inner pool overflow drops
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2 + Math.random() * 0.3;
+      const startY = 2.0 + Math.random() * 0.3;
+      const drop = new THREE.Mesh(new THREE.SphereGeometry(0.25, 4, 4), dropMat);
+      drop.position.set(Math.sin(a) * 4, startY, Math.cos(a) * 4);
+      tower.add(drop);
+      this.fountainParts.droplets.push({ mesh: drop, vel: new THREE.Vector3(Math.sin(a) * 0.3, 0, Math.cos(a) * 0.3), startY, endY: 1.15, cx: 0, cz: 0 });
+    }
+    // Each small jet — 80 drops each, same as the big spout, centered on jet position
+    for (let i = 0; i < 8; i++) {
+      const ja = (i / 8) * Math.PI * 2;
+      const jx = Math.sin(ja) * 6;
+      const jz = Math.cos(ja) * 6;
+      for (let j = 0; j < 80; j++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 2.5;
+        const startY = 3 + Math.random() * 2;
+        const drop = new THREE.Mesh(new THREE.SphereGeometry(0.25, 4, 4), dropMat);
+        drop.position.set(jx + Math.sin(a) * r, startY, jz + Math.cos(a) * r);
+        tower.add(drop);
+        this.fountainParts.droplets.push({ mesh: drop, vel: new THREE.Vector3(Math.sin(a) * 0.6, 0, Math.cos(a) * 0.6), startY, endY: 1.15, cx: jx, cz: jz });
+      }
+    }
+
+    // === LIGHTING — magical blue and warm gold ===
+    const waterLight = new THREE.PointLight(0x66bbff, 2, 20);
+    waterLight.position.set(0, 3, 0);
+    tower.add(waterLight);
+    const topGlow = new THREE.PointLight(0x88ddff, 1.5, 15);
+    topGlow.position.set(0, 12, 0);
+    tower.add(topGlow);
+    // Gold accent lights at base
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const gl = new THREE.PointLight(0xffcc55, 0.8, 8);
+      gl.position.set(Math.sin(a) * 7, 1, Math.cos(a) * 7);
+      tower.add(gl);
+    }
+
+    tower.position.set(0, 0, 0);
+    tower.scale.set(0.5, 0.5, 0.5);
+    tower.castShadow = true;
+    this.scene3d.add(tower);
+
+    // No colliders — player can walk inside and climb the tower
   }
 
   private createTrees(): void {
@@ -2280,6 +2832,68 @@ export class BattleScene extends Phaser.Scene {
     img.src = dataUrl;
   }
 
+  // Apply the full-body drawing to each body part as textures
+  private applyDrawnSkin(
+    _dataUrl: string,
+    chestMesh: THREE.Mesh,
+    leftUpperArmMesh: THREE.Object3D, rightUpperArmMesh: THREE.Object3D,
+    leftForearmMesh: THREE.Object3D, rightForearmMesh: THREE.Object3D,
+    leftThighMesh: THREE.Object3D, rightThighMesh: THREE.Object3D,
+    leftShinMesh: THREE.Object3D, rightShinMesh: THREE.Object3D,
+    leftShoeMesh: THREE.Object3D, rightShoeMesh: THREE.Object3D,
+    headGroup: THREE.Group,
+  ): void {
+    // Load per-body-part pixel data from localStorage
+    let data: Record<string, (string | null)[][]>;
+    try {
+      const raw = localStorage.getItem('fighting-wars-skin-drawing');
+      if (!raw) return;
+      data = JSON.parse(raw);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    } catch (_e) { return; }
+
+    const TEX_SIZE = 32;
+    const applyPartToMesh = (mesh: THREE.Object3D, partName: string) => {
+      if (!(mesh instanceof THREE.Mesh)) return;
+      const partData = data[partName];
+      if (!partData || !Array.isArray(partData)) return;
+      const c = document.createElement('canvas');
+      c.width = TEX_SIZE;
+      c.height = TEX_SIZE;
+      const ctx = c.getContext('2d')!;
+      let hasPixels = false;
+      for (let y = 0; y < TEX_SIZE; y++) {
+        for (let x = 0; x < TEX_SIZE; x++) {
+          const color = partData[y]?.[x];
+          if (color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, 1, 1);
+            hasPixels = true;
+          }
+        }
+      }
+      if (!hasPixels) return;
+      const tex = new THREE.CanvasTexture(c);
+      tex.minFilter = THREE.NearestFilter;
+      tex.magFilter = THREE.NearestFilter;
+      mesh.material = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.7 });
+    };
+
+    // Map saved part names to in-game meshes
+    applyPartToMesh(headGroup.children[0], 'head');
+    applyPartToMesh(chestMesh, 'chest');
+    applyPartToMesh(leftUpperArmMesh, 'lArm_upper');
+    applyPartToMesh(rightUpperArmMesh, 'rArm_upper');
+    applyPartToMesh(leftForearmMesh, 'lArm_fore');
+    applyPartToMesh(rightForearmMesh, 'rArm_fore');
+    applyPartToMesh(leftThighMesh, 'lLeg_thigh');
+    applyPartToMesh(rightThighMesh, 'rLeg_thigh');
+    applyPartToMesh(leftShinMesh, 'lLeg_shin');
+    applyPartToMesh(rightShinMesh, 'rLeg_shin');
+    applyPartToMesh(leftShoeMesh, 'lLeg_shoe');
+    applyPartToMesh(rightShoeMesh, 'rLeg_shoe');
+  }
+
   private getRandomBrand(): string {
     return BattleScene.BRANDS[Math.floor(Math.random() * BattleScene.BRANDS.length)];
   }
@@ -2293,73 +2907,116 @@ export class BattleScene extends Phaser.Scene {
   ): THREE.Group {
     const headGroup = new THREE.Group();
 
-    // Head sphere
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), skinMat);
-    head.scale.set(1, 1.1, 0.95);
+    // Stylized Fortnite head — slightly oversized, smooth
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 16), skinMat);
+    head.scale.set(1, 1.15, 1);
     head.castShadow = true;
     headGroup.add(head);
 
-    // Eyes
-    const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2 });
-    const irisMat = new THREE.MeshStandardMaterial({ color: eyeColor });
-    const pupilMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    // Jaw / chin — gives face more shape
+    const jaw = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 12), skinMat);
+    jaw.position.set(0, -0.1, 0.02);
+    jaw.scale.set(1, 0.7, 0.9);
+    headGroup.add(jaw);
+
+    // Cheekbones
     for (const side of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 8), whiteMat);
-      eye.position.set(side * 0.07, 0.04, 0.16);
-      headGroup.add(eye);
-      const iris = new THREE.Mesh(new THREE.CircleGeometry(0.025, 10), irisMat);
-      iris.position.set(side * 0.07, 0.04, 0.199);
-      headGroup.add(iris);
-      const pupil = new THREE.Mesh(new THREE.CircleGeometry(0.012, 8), pupilMat);
-      pupil.position.set(side * 0.07, 0.04, 0.2);
-      headGroup.add(pupil);
+      const cheek = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), skinMat);
+      cheek.position.set(side * 0.12, -0.02, 0.1);
+      headGroup.add(cheek);
     }
 
-    // Nose
-    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 8), skinMat);
-    nose.position.set(0, -0.01, 0.19);
-    headGroup.add(nose);
+    // Eyes — larger, more expressive (Fortnite style)
+    const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.1, metalness: 0.05 });
+    const irisMat = new THREE.MeshStandardMaterial({ color: eyeColor, roughness: 0.3 });
+    const pupilMat = new THREE.MeshStandardMaterial({ color: 0x050505 });
+    for (const side of [-1, 1]) {
+      // Eye socket shadow
+      const socket = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0x8a6a5a, roughness: 0.8 }));
+      socket.position.set(side * 0.08, 0.05, 0.17);
+      socket.scale.set(1.2, 0.8, 0.5);
+      headGroup.add(socket);
+      // Eyeball
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.042, 12, 12), whiteMat);
+      eye.position.set(side * 0.08, 0.05, 0.18);
+      headGroup.add(eye);
+      // Iris — bigger for cartoon look
+      const iris = new THREE.Mesh(new THREE.CircleGeometry(0.03, 12), irisMat);
+      iris.position.set(side * 0.08, 0.05, 0.221);
+      headGroup.add(iris);
+      // Pupil
+      const pupil = new THREE.Mesh(new THREE.CircleGeometry(0.015, 10), pupilMat);
+      pupil.position.set(side * 0.08, 0.05, 0.222);
+      headGroup.add(pupil);
+      // Eye highlight
+      const highlight = new THREE.Mesh(new THREE.CircleGeometry(0.006, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      highlight.position.set(side * 0.08 + 0.015, 0.06, 0.223);
+      headGroup.add(highlight);
+      // Eyebrow
+      const brow = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.015, 0.02),
+        new THREE.MeshStandardMaterial({ color: hairColor, roughness: 0.9 }));
+      brow.position.set(side * 0.08, 0.1, 0.18);
+      brow.rotation.z = side * -0.15;
+      headGroup.add(brow);
+    }
 
-    // Mouth
-    const mouthMat = new THREE.MeshStandardMaterial({ color: 0xcc5555 });
-    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.015, 0.01), mouthMat);
-    mouth.position.set(0, -0.07, 0.18);
+    // Nose — slightly stylized
+    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 10), skinMat);
+    nose.position.set(0, 0, 0.21);
+    nose.scale.set(1, 0.8, 1.2);
+    headGroup.add(nose);
+    // Nostrils
+    for (const side of [-1, 1]) {
+      const nostril = new THREE.Mesh(new THREE.SphereGeometry(0.01, 6, 6), skinMat);
+      nostril.position.set(side * 0.015, -0.015, 0.22);
+      headGroup.add(nostril);
+    }
+
+    // Mouth — curved smile line
+    const mouthMat = new THREE.MeshStandardMaterial({ color: 0xbb5555, roughness: 0.5 });
+    const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.006, 6, 10, Math.PI), mouthMat);
+    mouth.position.set(0, -0.065, 0.19);
+    mouth.rotation.x = Math.PI;
+    mouth.rotation.z = Math.PI;
     headGroup.add(mouth);
 
-    // Ears
+    // Ears — more detailed
     for (const side of [-1, 1]) {
-      const ear = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 6), skinMat);
-      ear.position.set(side * 0.2, 0.02, 0);
-      ear.scale.set(0.4, 1, 0.7);
+      const ear = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), skinMat);
+      ear.position.set(side * 0.22, 0.02, 0);
+      ear.scale.set(0.35, 1, 0.7);
       headGroup.add(ear);
+      const earInner = new THREE.Mesh(new THREE.SphereGeometry(0.02, 6, 6),
+        new THREE.MeshStandardMaterial({ color: 0xd4a088, roughness: 0.7 }));
+      earInner.position.set(side * 0.21, 0.02, 0.01);
+      earInner.scale.set(0.3, 0.8, 0.5);
+      headGroup.add(earInner);
     }
 
     // Hair or cap
     if (!hasCap) {
-      const hairMat = new THREE.MeshStandardMaterial({ color: hairColor, roughness: 0.9 });
-      const hair = new THREE.Mesh(
-        new THREE.SphereGeometry(0.22, 10, 10, 0, Math.PI * 2, 0, Math.PI * 0.5),
-        hairMat
-      );
-      hair.position.y = 0.04;
-      headGroup.add(hair);
+      const hairMat = new THREE.MeshStandardMaterial({ color: hairColor, roughness: 0.85 });
+      // Full hair volume — top
+      const hairTop = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 14, 0, Math.PI * 2, 0, Math.PI * 0.55), hairMat);
+      hairTop.position.y = 0.04;
+      headGroup.add(hairTop);
+      // Hair sides — wraps around
+      const hairBack = new THREE.Mesh(new THREE.SphereGeometry(0.23, 12, 12, 0, Math.PI * 2, 0.3, Math.PI * 0.4), hairMat);
+      hairBack.position.set(0, 0.02, -0.02);
+      headGroup.add(hairBack);
     } else if (capMat) {
       const cap = new THREE.Mesh(
-        new THREE.SphereGeometry(0.23, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.45),
+        new THREE.SphereGeometry(0.25, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.45),
         capMat
       );
-      cap.position.y = 0.04;
+      cap.position.y = 0.05;
       headGroup.add(cap);
-      const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 0.015, 10, 1, false, -Math.PI * 0.5, Math.PI), capMat);
-      brim.position.set(0, 0.1, 0.18);
-      brim.rotation.x = -0.3;
+      const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.18, 0.018, 12, 1, false, -Math.PI * 0.5, Math.PI), capMat);
+      brim.position.set(0, 0.12, 0.2);
+      brim.rotation.x = -0.25;
       headGroup.add(brim);
-
-      // Brand label on cap front
-      const capLabel = this.createBrandLabel(this.getRandomBrand(), 0.22, 0.12, 40);
-      capLabel.position.set(0, 0.13, 0.27);
-      capLabel.rotation.x = -0.2;
-      headGroup.add(capLabel);
     }
 
     return headGroup;
@@ -2415,24 +3072,34 @@ export class BattleScene extends Phaser.Scene {
     chest.castShadow = true;
     torso.add(chest);
 
-    // Shirt label — custom uploaded image, selected brand, or random brand
-    if (playerShirtLabel) {
-      this.applyImageLabel(torso, playerShirtLabel);
-    } else {
-      const brand = playerShirtBrand || this.getRandomBrand();
-      const playerLbl = this.createBrandLabel(brand, 0.5, 0.5, 90);
-      playerLbl.position.set(0, 0.3, 0.19);
-      torso.add(playerLbl);
+    // Check for drawn skin — per-body-part pixel data
+    const globalDrawing = localStorage.getItem('fighting-wars-skin-drawing');
+    let isDrawnSkin = false;
+    if (globalDrawing) {
+      try {
+        const parsed = JSON.parse(globalDrawing);
+        isDrawnSkin = parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+      } catch (_e) { /* not JSON, ignore */ }
     }
+    const drawnSkinData = globalDrawing;
 
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.1, 8), skinMat);
     neck.position.y = 0.6;
     torso.add(neck);
 
-    // Head — realistic human head using lathe profile
-    const hasHat = playerHatColor !== -1;
-    const hatMat = hasHat ? new THREE.MeshStandardMaterial({ color: playerHatColor, roughness: 0.7 }) : null;
-    const headGroup = this.buildRealisticHead(skinMat, vis.eye, vis.hair, hasHat, hatMat);
+    // Head
+    let headGroup: THREE.Group;
+    if (isDrawnSkin) {
+      // Drawn skin — plain sphere head, no hair/eyes/nose
+      headGroup = new THREE.Group();
+      const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 16), skinMat);
+      headMesh.scale.set(1, 1.15, 1);
+      headGroup.add(headMesh);
+    } else {
+      const hasHat = playerHatColor !== -1;
+      const hatMat = hasHat ? new THREE.MeshStandardMaterial({ color: playerHatColor, roughness: 0.7 }) : null;
+      headGroup = this.buildRealisticHead(skinMat, vis.eye, vis.hair, hasHat, hatMat);
+    }
     headGroup.position.y = 0.72;
     torso.add(headGroup);
 
@@ -2502,6 +3169,20 @@ export class BattleScene extends Phaser.Scene {
     shadow.position.y = 0.01;
     root.add(shadow);
 
+    // Apply drawn skin textures to each body part
+    if (isDrawnSkin && drawnSkinData) {
+      this.applyDrawnSkin(
+        drawnSkinData,
+        chest,
+        leftUpperArm.children[0], rightUpperArm.children[0],  // upper arm meshes
+        leftForearm.children[0], rightForearm.children[0],    // forearm meshes
+        leftThigh.children[0], rightThigh.children[0],        // thigh meshes
+        leftShin.children[0], rightShin.children[0],          // shin meshes
+        leftShin.children[1], rightShin.children[1],          // shoe meshes
+        headGroup,
+      );
+    }
+
     root.position.set(0, 0, 0);
     this.scene3d.add(root);
 
@@ -2518,6 +3199,9 @@ export class BattleScene extends Phaser.Scene {
     this.pRightThigh = rightThigh;
     this.pRightShin = rightShin;
 
+    // Attach equipped armor meshes
+    this.attachArmorMeshes(torso, headGroup, hips, leftThigh, rightThigh, leftShin, rightShin, leftUpperArm, rightUpperArm);
+
     // Health bar above player
     const { sprite, ctx, texture } = this.createHealthBarSprite();
     sprite.position.set(0, 2.5, 0);
@@ -2525,6 +3209,143 @@ export class BattleScene extends Phaser.Scene {
     this.playerHealthBar = sprite;
     this.playerHealthCtx = ctx;
     this.playerHealthTex = texture;
+  }
+
+  private attachArmorMeshes(
+    torso: THREE.Group, headGroup: THREE.Group, hips: THREE.Group,
+    leftThigh: THREE.Group, rightThigh: THREE.Group,
+    leftShin: THREE.Group, rightShin: THREE.Group,
+    leftUpperArm: THREE.Group, rightUpperArm: THREE.Group,
+  ): void {
+    const equippedIds = getEquippedArmor();
+    if (equippedIds.length === 0) return;
+
+    const equipped = equippedIds.map(id => ARMOR_ITEMS.find(a => a.id === id)).filter(Boolean) as typeof ARMOR_ITEMS;
+    if (equipped.length === 0) return;
+    const slots = new Set(equipped.map(a => a.slot));
+
+    const makeArmorMat = (color: number) => new THREE.MeshStandardMaterial({
+      color, roughness: 0.15, metalness: 0.9, emissive: color, emissiveIntensity: 0.2,
+    });
+
+    const isFull = slots.has('full');
+    const fullItem = equipped.find(a => a.slot === 'full');
+
+    // HEAD — big visible helmet that covers the whole head
+    const headItem = isFull ? fullItem! : equipped.find(a => a.slot === 'head');
+    if (headItem) {
+      const mat = makeArmorMat(headItem.color);
+      // Full dome — covers entire head
+      const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 14), mat);
+      helmet.position.y = 0.02;
+      helmet.scale.set(1, 1.1, 1);
+      helmet.castShadow = true;
+      headGroup.add(helmet);
+      // Face plate with dark visor slit
+      const facePlate = new THREE.Mesh(
+        new THREE.BoxGeometry(0.22, 0.06, 0.06),
+        new THREE.MeshStandardMaterial({ color: 0x111122, metalness: 0.95, roughness: 0.05 }),
+      );
+      facePlate.position.set(0, -0.02, 0.24);
+      headGroup.add(facePlate);
+      // Mohawk crest on top
+      const crest = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.14, 0.3), mat);
+      crest.position.set(0, 0.2, -0.02);
+      headGroup.add(crest);
+    }
+
+    // CHEST — thick armor plates that clearly wrap the torso
+    const chestItem = isFull ? fullItem! : equipped.find(a => a.slot === 'chest');
+    if (chestItem) {
+      const mat = makeArmorMat(chestItem.color);
+      // Front plate — box that sticks out from chest
+      const front = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.56, 0.12), mat);
+      front.position.set(0, 0.3, 0.2);
+      front.castShadow = true;
+      torso.add(front);
+      // Back plate
+      const back = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.52, 0.1), mat);
+      back.position.set(0, 0.3, -0.18);
+      back.castShadow = true;
+      torso.add(back);
+      // Side plates
+      for (const side of [-1, 1]) {
+        const sp = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.48, 0.3), mat);
+        sp.position.set(side * 0.3, 0.3, 0);
+        torso.add(sp);
+      }
+      // Big shoulder pads
+      for (const side of [-1, 1]) {
+        const pad = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10), mat);
+        pad.scale.set(1.3, 0.7, 1.3);
+        pad.position.set(0, 0.0, 0);
+        if (side === -1) leftUpperArm.add(pad);
+        else rightUpperArm.add(pad);
+      }
+      // Collar
+      const collar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.36), mat);
+      collar.position.set(0, 0.58, 0);
+      torso.add(collar);
+    }
+
+    // LEGS — thick plates over thighs and shins
+    const legItem = isFull ? fullItem! : equipped.find(a => a.slot === 'legs');
+    if (legItem) {
+      const mat = makeArmorMat(legItem.color);
+      for (const thigh of [leftThigh, rightThigh]) {
+        // Thigh plate — wraps around leg
+        const guard = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.36, 0.24), mat);
+        guard.position.set(0, -0.2, 0);
+        guard.castShadow = true;
+        thigh.add(guard);
+        // Knee cap — sphere
+        const knee = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), mat);
+        knee.position.set(0, -0.38, 0.08);
+        thigh.add(knee);
+      }
+      for (const shin of [leftShin, rightShin]) {
+        // Shin plate
+        const shinGuard = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.32, 0.22), mat);
+        shinGuard.position.set(0, -0.16, 0);
+        shin.add(shinGuard);
+      }
+    }
+
+    // BOOTS — thick armored boots
+    const feetItem = isFull ? fullItem! : equipped.find(a => a.slot === 'feet');
+    if (feetItem) {
+      const mat = makeArmorMat(feetItem.color);
+      for (const shin of [leftShin, rightShin]) {
+        // Boot — big box around foot
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.14, 0.34), mat);
+        boot.position.set(0, -0.36, 0.04);
+        shin.add(boot);
+        // Ankle guard
+        const ankle = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.1, 0.22), mat);
+        ankle.position.set(0, -0.28, 0);
+        shin.add(ankle);
+      }
+    }
+
+    // Shield (smooth rounded shield on left arm)
+    const shieldItem = equipped.find(a => a.slot === 'shield');
+    if (shieldItem) {
+      const mat = makeArmorMat(shieldItem.color);
+      // Curved shield shape
+      const shield = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12, 0, Math.PI, 0, Math.PI * 0.7), mat);
+      shield.position.set(-0.12, -0.1, 0);
+      shield.rotation.y = Math.PI / 2;
+      shield.castShadow = true;
+      leftUpperArm.add(shield);
+      // Shield emblem
+      const emblem = new THREE.Mesh(
+        new THREE.CircleGeometry(0.06, 16),
+        new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.9, roughness: 0.1 }),
+      );
+      emblem.position.set(-0.2, -0.1, 0);
+      emblem.rotation.y = -Math.PI / 2;
+      leftUpperArm.add(emblem);
+    }
   }
 
   private createHealthBarSprite(): { sprite: THREE.Sprite; ctx: CanvasRenderingContext2D; texture: THREE.CanvasTexture } {
@@ -2560,155 +3381,66 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private createGuns(): void {
-    const gunTypes = [
-      { name: 'Minigun', color: 0x555555, barrelLen: 0.8, bodyW: 0.16, bodyH: 0.16 },
-    ];
-    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 });
-    const gunMetal = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.85, roughness: 0.25 });
-    const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1a, roughness: 0.8, metalness: 0.05 });
+    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.6, roughness: 0.3 });
+    const bbBlack = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.4, roughness: 0.5 });
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4420, roughness: 0.85, metalness: 0.05 });
 
     for (let i = 0; i < 80; i++) {
-      const gt = gunTypes[Math.floor(Math.random() * gunTypes.length)];
       const group = new THREE.Group();
-      const bodyMat = new THREE.MeshStandardMaterial({ color: gt.color, metalness: 0.7, roughness: 0.3 });
-      const isGold = gt.name.includes('Gold');
-      const mainMat = isGold ? new THREE.MeshStandardMaterial({ color: 0xddaa00, metalness: 0.95, roughness: 0.1 }) : bodyMat;
 
-      // Receiver / main body
-      const receiver = new THREE.Mesh(new THREE.BoxGeometry(gt.bodyW, gt.bodyH, 0.35), mainMat);
-      group.add(receiver);
+      // BB gun body — slim rectangular receiver
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.3), bbBlack);
+      group.add(body);
 
-      // Top rail
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(gt.bodyW * 0.4, 0.015, 0.25), darkMetal);
-      rail.position.set(0, gt.bodyH / 2 + 0.007, 0.02);
-      group.add(rail);
-
-      // Barrel - thicker for machine guns
-      const barrelR = gt.name.includes('Minigun') || gt.name.includes('Gatling') ? 0.025 : 0.03;
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(barrelR, barrelR + 0.005, gt.barrelLen, 8), gunMetal);
+      // Thin barrel — long and skinny like a BB gun
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.5, 6), darkMetal);
       barrel.rotation.x = Math.PI / 2;
-      barrel.position.z = 0.175 + gt.barrelLen / 2;
+      barrel.position.z = 0.15 + 0.25;
       group.add(barrel);
 
-      // Barrel shroud / heat shield with holes
-      if (!gt.name.includes('Gatling') && !gt.name.includes('Minigun')) {
-        const shroud = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.045, 0.045, gt.barrelLen * 0.6, 8, 1, true),
-          new THREE.MeshStandardMaterial({ color: gt.color, metalness: 0.6, roughness: 0.4, side: THREE.DoubleSide })
-        );
-        shroud.rotation.x = Math.PI / 2;
-        shroud.position.z = 0.175 + gt.barrelLen * 0.3;
-        group.add(shroud);
-      }
-
-      // Multi-barrel for Minigun/Gatling
-      if (gt.name.includes('Minigun') || gt.name.includes('Gatling')) {
-        for (let b = 0; b < 6; b++) {
-          const angle = (b / 6) * Math.PI * 2;
-          const bx = Math.cos(angle) * 0.04;
-          const by = Math.sin(angle) * 0.04;
-          const extraBarrel = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.012, 0.012, gt.barrelLen * 0.85, 6),
-            gunMetal
-          );
-          extraBarrel.rotation.x = Math.PI / 2;
-          extraBarrel.position.set(bx, by, 0.175 + gt.barrelLen * 0.4);
-          group.add(extraBarrel);
-        }
-        // Barrel housing ring
-        const housing = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.015, 6, 12), darkMetal);
-        housing.position.z = 0.175 + gt.barrelLen * 0.15;
-        group.add(housing);
-        const housing2 = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.015, 6, 12), darkMetal);
-        housing2.position.z = 0.175 + gt.barrelLen * 0.7;
-        group.add(housing2);
-      }
-
-      // Muzzle brake / flash hider
-      const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.03, 0.06, 8), darkMetal);
+      // Muzzle tip
+      const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.012, 0.03, 6), darkMetal);
       muzzle.rotation.x = Math.PI / 2;
-      muzzle.position.z = 0.175 + gt.barrelLen + 0.03;
+      muzzle.position.z = 0.15 + 0.5 + 0.015;
       group.add(muzzle);
 
-      // Front sight
-      const fSight = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.03, 0.008), darkMetal);
-      fSight.position.set(0, gt.bodyH / 2 + 0.02, 0.175 + gt.barrelLen * 0.8);
+      // Front sight — tiny nub
+      const fSight = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.02, 0.006), darkMetal);
+      fSight.position.set(0, 0.05, 0.35);
       group.add(fSight);
 
-      // Rear sight
-      const rSight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.025, 0.008), darkMetal);
-      rSight.position.set(0, gt.bodyH / 2 + 0.018, -0.08);
-      group.add(rSight);
+      // Wooden stock — classic BB gun look
+      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.09, 0.25), woodMat);
+      stock.position.set(0, -0.01, -0.15 - 0.125);
+      group.add(stock);
 
-      // Pistol grip
-      const grip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.13, 0.06), darkMetal);
-      grip.position.set(0, -gt.bodyH / 2 - 0.06, -0.06);
-      grip.rotation.x = 0.25;
-      group.add(grip);
+      // Stock curves down at the end (butt)
+      const butt = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.07, 0.06), woodMat);
+      butt.position.set(0, -0.03, -0.15 - 0.25 - 0.03);
+      butt.rotation.x = 0.2;
+      group.add(butt);
 
       // Trigger guard
-      const guardShape = new THREE.Mesh(
-        new THREE.TorusGeometry(0.035, 0.005, 4, 8, Math.PI),
+      const guard = new THREE.Mesh(
+        new THREE.TorusGeometry(0.02, 0.003, 4, 8, Math.PI),
         darkMetal
       );
-      guardShape.position.set(0, -gt.bodyH / 2 - 0.01, 0.0);
-      guardShape.rotation.y = Math.PI / 2;
-      group.add(guardShape);
+      guard.position.set(0, -0.04, 0.0);
+      guard.rotation.y = Math.PI / 2;
+      group.add(guard);
 
-      // Stock / buttstock
-      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.22),
-        gt.name.includes('RPK') || gt.name.includes('M249') ? woodMat : mainMat);
-      stock.position.set(0, 0, -0.175 - 0.11);
-      group.add(stock);
-      const buttPad = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.105, 0.015),
-        new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 1 }));
-      buttPad.position.set(0, 0, -0.175 - 0.22 - 0.007);
-      group.add(buttPad);
-
-      // Box magazine / drum / belt feed
-      if (gt.name.includes('M60') || gt.name.includes('M249') || gt.name.includes('MG42')) {
-        // Belt-fed ammo box
-        const ammoBox = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.06),
-          new THREE.MeshStandardMaterial({ color: 0x2a3a2a, metalness: 0.3, roughness: 0.7 }));
-        ammoBox.position.set(0, -gt.bodyH / 2 - 0.06, 0.08);
-        group.add(ammoBox);
-        // Feed tray
-        const feed = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.01, 0.06), gunMetal);
-        feed.position.set(0, gt.bodyH / 2 + 0.005, 0.08);
-        group.add(feed);
-      } else if (gt.name.includes('Chain') || gt.name.includes('RPK')) {
-        // Banana/drum mag
-        const mag = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.12, 8), darkMetal);
-        mag.position.set(0, -gt.bodyH / 2 - 0.06, 0.06);
-        group.add(mag);
-      }
-
-      // Bipod legs (for M60, M249, MG42)
-      if (gt.name.includes('M60') || gt.name.includes('M249') || gt.name.includes('MG42')) {
-        for (const side of [-1, 1]) {
-          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.15, 4), darkMetal);
-          leg.position.set(side * 0.04, -gt.bodyH / 2 - 0.07, 0.175 + gt.barrelLen * 0.5);
-          leg.rotation.x = 0.1;
-          leg.rotation.z = side * 0.3;
-          group.add(leg);
-        }
-      }
-
-      // Carry handle (M60, M249)
-      if (gt.name.includes('M60') || gt.name.includes('M249')) {
-        const handle = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.006, 4, 8, Math.PI), darkMetal);
-        handle.position.set(0, gt.bodyH / 2 + 0.035, 0.175 + gt.barrelLen * 0.3);
-        handle.rotation.x = Math.PI;
-        group.add(handle);
-      }
+      // Pump lever under barrel (like a Daisy BB gun)
+      const pump = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.025, 0.3), woodMat);
+      pump.position.set(0, -0.04, 0.15);
+      group.add(pump);
 
       // Glow ring underneath
       const glow = new THREE.Mesh(
-        new THREE.RingGeometry(0.25, 0.4, 16),
-        new THREE.MeshBasicMaterial({ color: isGold ? 0xffdd00 : 0x44aaff, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+        new THREE.RingGeometry(0.2, 0.35, 16),
+        new THREE.MeshBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
       );
       glow.rotation.x = -Math.PI / 2;
-      glow.position.y = -0.12;
+      glow.position.y = -0.1;
       group.add(glow);
 
       const gx = (Math.random() - 0.5) * 900;
@@ -2717,7 +3449,7 @@ export class BattleScene extends Phaser.Scene {
       group.position.set(gx, this.getTerrainHeight(gx, gz) + 0.25, gz);
       group.rotation.y = Math.random() * Math.PI * 2;
       this.scene3d.add(group);
-      this.gunPickups.push({ group, name: gt.name, color: gt.color, picked: false });
+      this.gunPickups.push({ group, name: 'BB Gun', color: 0x222222, picked: false });
     }
   }
 
@@ -2734,7 +3466,7 @@ export class BattleScene extends Phaser.Scene {
     const oliveMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.7 });
     const greaseMat = new THREE.MeshStandardMaterial({ color: 0xdd8800, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.4 });
 
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 200; i++) {
       const group = new THREE.Group();
       const sc = 0.8 + Math.random() * 0.4;
 
@@ -2920,13 +3652,6 @@ export class BattleScene extends Phaser.Scene {
       chest.castShadow = true;
       torso.add(chest);
 
-      // Brand label on shirt (60% chance)
-      if (Math.random() < 0.6) {
-        const label = this.createBrandLabel(this.getRandomBrand(), 0.5, 0.5, 90);
-        label.position.set(0, 0.3, 0.19);
-        torso.add(label);
-      }
-
       // Collar / neck base
       const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.1, 8), skinMat);
       neck.position.y = 0.6;
@@ -3072,6 +3797,50 @@ export class BattleScene extends Phaser.Scene {
       rSole.position.set(0, -0.39, 0.04);
       rightShin.add(rSole);
 
+      // Random armor on ~40% of bots
+      if (Math.random() < 0.4) {
+        const armorTiers = [
+          ['iron-helmet', 'iron-chestplate', 'leg-guards', 'iron-boots'],
+          ['gold-helmet', 'gold-chestplate', 'leg-guards', 'iron-boots'],
+          ['full-iron-suit'],
+          ['full-diamond-suit'],
+          ['diamond-helmet', 'diamond-chestplate', 'leg-guards', 'iron-boots'],
+        ];
+        const tier = armorTiers[Math.floor(Math.random() * armorTiers.length)];
+        const botArmorItems = tier.map(id => ARMOR_ITEMS.find(a => a.id === id)).filter(Boolean) as typeof ARMOR_ITEMS;
+        const botSlots = new Set(botArmorItems.map(a => a.slot));
+        const botIsFull = botSlots.has('full');
+        const botFullItem = botArmorItems.find(a => a.slot === 'full');
+        const makeAMat = (c: number) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.2, metalness: 0.85, emissive: c, emissiveIntensity: 0.15 });
+
+        const bHeadItem = botIsFull ? botFullItem! : botArmorItems.find(a => a.slot === 'head');
+        if (bHeadItem) {
+          const m = makeAMat(bHeadItem.color);
+          const h = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.65), m);
+          h.position.y = 0.06;
+          headGroup.add(h);
+        }
+        const bChestItem = botIsFull ? botFullItem! : botArmorItems.find(a => a.slot === 'chest');
+        if (bChestItem) {
+          const m = makeAMat(bChestItem.color);
+          const f = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.28, 0.56, 16, 1, true, -Math.PI * 0.45, Math.PI * 0.9), m);
+          f.position.set(0, 0.3, 0);
+          torso.add(f);
+          const b = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.27, 0.52, 16, 1, true, Math.PI * 0.55, Math.PI * 0.9), m);
+          b.position.set(0, 0.3, 0);
+          torso.add(b);
+        }
+        const bLegItem = botIsFull ? botFullItem! : botArmorItems.find(a => a.slot === 'legs');
+        if (bLegItem) {
+          const m = makeAMat(bLegItem.color);
+          for (const th of [leftThigh, rightThigh]) {
+            const g = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.1, 0.3, 12), m);
+            g.position.set(0, -0.18, 0);
+            th.add(g);
+          }
+        }
+      }
+
       // Shadow blob on ground
       const shadowGeo = new THREE.CircleGeometry(0.35, 12);
       const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 });
@@ -3126,7 +3895,8 @@ export class BattleScene extends Phaser.Scene {
       { body: 0x3a2a2a, light: 0x5a4a4a },
     ];
 
-    for (let i = 0; i < 20; i++) {
+    // T-Rexes (8)
+    for (let i = 0; i < 8; i++) {
       const group = new THREE.Group();
       const rc = rexColors[i % rexColors.length];
 
@@ -3424,7 +4194,7 @@ export class BattleScene extends Phaser.Scene {
         ridge.position.set(0, 3.35, -0.3 + ri * 0.35); group.add(ridge);
       }
 
-      group.scale.set(1.4, 1.4, 1.4);
+      group.scale.set(3, 3, 3);
 
       // Place T-Rex
       const angle = Math.random() * Math.PI * 2;
@@ -3450,6 +4220,334 @@ export class BattleScene extends Phaser.Scene {
         bodyGroup,
         runPhase: Math.random() * Math.PI * 2,
       });
+    }
+
+    // === TRICERATOPS (6) — big, stocky, 3 horns, frill ===
+    const triColors = [
+      { body: 0x6a5a3a, light: 0x8a7a5a },
+      { body: 0x5a6a4a, light: 0x7a8a6a },
+      { body: 0x7a5a4a, light: 0x9a7a6a },
+    ];
+    for (let i = 0; i < 6; i++) {
+      const group = new THREE.Group();
+      const tc = triColors[i % triColors.length];
+      const bmat = new THREE.MeshStandardMaterial({ color: tc.body, roughness: 0.85 });
+      const lmat = new THREE.MeshStandardMaterial({ color: tc.light, roughness: 0.8 });
+      const hornMat = new THREE.MeshStandardMaterial({ color: 0xeeddaa, roughness: 0.4, metalness: 0.1 });
+
+      const bodyGroup = new THREE.Group();
+      bodyGroup.position.y = 1.8; group.add(bodyGroup);
+      // Big round body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.6, 3.2), bmat);
+      body.castShadow = true; bodyGroup.add(body);
+      // Belly
+      const belly = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 2.8), lmat);
+      belly.position.y = -0.7; bodyGroup.add(belly);
+
+      // Head
+      const headG = new THREE.Group();
+      headG.position.set(0, 0.2, 1.8); bodyGroup.add(headG);
+      const skull = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.8, 1.0), bmat);
+      headG.add(skull);
+      const beak = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.5), lmat);
+      beak.position.z = 0.7; headG.add(beak);
+      // Frill — big bony plate behind head
+      const frill = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.6, 0.15), bmat);
+      frill.position.set(0, 0.6, -0.5); headG.add(frill);
+      // Frill edge bumps
+      for (let fi = 0; fi < 8; fi++) {
+        const bump = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), hornMat);
+        const angle = (fi / 8) * Math.PI - Math.PI * 0.5;
+        bump.position.set(Math.cos(angle) * 1.0, Math.sin(angle) * 0.8 + 0.6, -0.5);
+        headG.add(bump);
+      }
+      // Nose horn — big
+      const noseHorn = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.8, 6), hornMat);
+      noseHorn.position.set(0, 0.3, 0.9); headG.add(noseHorn);
+      // Two brow horns — long
+      for (const s of [-1, 1]) {
+        const horn = new THREE.Mesh(new THREE.ConeGeometry(0.07, 1.2, 6), hornMat);
+        horn.position.set(s * 0.35, 0.5, 0.1);
+        horn.rotation.z = s * -0.3;
+        horn.rotation.x = -0.4;
+        headG.add(horn);
+      }
+      // Eyes
+      for (const s of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), new THREE.MeshStandardMaterial({ color: 0x332200 }));
+        eye.position.set(s * 0.45, 0.1, 0.3); headG.add(eye);
+      }
+
+      // Jaw
+      const jawPivot = new THREE.Group();
+      jawPivot.position.set(0, -0.3, 0.2); headG.add(jawPivot);
+      const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.25, 0.8), lmat);
+      jaw.position.set(0, -0.1, 0.2); jawPivot.add(jaw);
+
+      // 4 thick legs
+      const legPivots: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[] = [];
+      for (const side of [-1, 1]) {
+        for (const fz of [-0.8, 0.8]) {
+          const thighPivot = new THREE.Group();
+          thighPivot.position.set(side * 0.85, 1.5, fz); group.add(thighPivot);
+          const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.2, 0.55), bmat);
+          thigh.position.y = -0.6; thigh.castShadow = true; thighPivot.add(thigh);
+          const shinPivot = new THREE.Group();
+          shinPivot.position.y = -1.1; thighPivot.add(shinPivot);
+          const shin = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.8, 0.45), lmat);
+          shin.position.y = -0.4; shinPivot.add(shin);
+          const foot = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.15, 0.5), bmat);
+          foot.position.set(0, -0.8, 0.05); shinPivot.add(foot);
+          legPivots.push({ thighPivot, shinPivot, side });
+        }
+      }
+
+      // Tail
+      const tailPivots: THREE.Group[] = [];
+      let tp: THREE.Object3D = bodyGroup;
+      for (let ti = 0; ti < 5; ti++) {
+        const pivot = new THREE.Group();
+        pivot.position.set(0, 0, ti === 0 ? -1.7 : -0.5);
+        tp.add(pivot);
+        const sc = 1 - ti * 0.15;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.5 * sc, 0.4 * sc, 0.55), bmat);
+        pivot.add(seg);
+        tailPivots.push(pivot);
+        tp = pivot;
+      }
+
+      group.scale.set(2.5, 2.5, 2.5);
+      const cx = (Math.random() - 0.5) * 800;
+      const cz = (Math.random() - 0.5) * 800;
+      group.position.set(cx, this.getTerrainHeight(cx, cz), cz);
+      group.rotation.y = Math.random() * Math.PI * 2;
+      this.scene3d.add(group);
+      this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 20 + Math.random() * 15, driver: 'none', legPivots, tailPivots, jawPivot, bodyGroup, runPhase: Math.random() * Math.PI * 2 });
+    }
+
+    // === VELOCIRAPTOR (8) — small, fast, feathered ===
+    const rapColors = [
+      { body: 0x3a5a2a, light: 0x5a7a4a },
+      { body: 0x5a3a2a, light: 0x7a5a4a },
+      { body: 0x2a3a5a, light: 0x4a5a7a },
+      { body: 0x5a5a2a, light: 0x7a7a4a },
+    ];
+    for (let i = 0; i < 8; i++) {
+      const group = new THREE.Group();
+      const vc = rapColors[i % rapColors.length];
+      const bmat = new THREE.MeshStandardMaterial({ color: vc.body, roughness: 0.75 });
+      const lmat = new THREE.MeshStandardMaterial({ color: vc.light, roughness: 0.7 });
+      const clawMat = new THREE.MeshStandardMaterial({ color: 0x1a1a10, roughness: 0.3 });
+
+      const bodyGroup = new THREE.Group();
+      bodyGroup.position.y = 1.2; group.add(bodyGroup);
+      // Sleek body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.5, 1.6), bmat);
+      body.castShadow = true; bodyGroup.add(body);
+      // Belly
+      const belly = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 1.4), lmat);
+      belly.position.y = -0.25; bodyGroup.add(belly);
+      // Feather tufts on arms and back
+      for (let fi = -2; fi <= 2; fi++) {
+        const feather = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.15, 0.25), new THREE.MeshStandardMaterial({ color: vc.light + 0x101010 }));
+        feather.position.set(0, 0.3, fi * 0.3); bodyGroup.add(feather);
+      }
+
+      // Neck
+      const neckBase = new THREE.Group();
+      neckBase.position.set(0, 0.15, 0.9); bodyGroup.add(neckBase);
+      const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.35, 0.3), bmat);
+      neckBase.add(neck);
+      const neckMid = new THREE.Group();
+      neckMid.position.set(0, 0.25, 0.15); neckBase.add(neckMid);
+
+      // Head — narrow and sharp
+      const headG = new THREE.Group();
+      headG.position.set(0, 0.2, 0.2); neckMid.add(headG);
+      const skull = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.35, 0.5), bmat);
+      headG.add(skull);
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.2, 0.4), lmat);
+      snout.position.z = 0.4; headG.add(snout);
+      // Big eyes
+      for (const s of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), new THREE.MeshStandardMaterial({ color: 0xddaa22 }));
+        eye.position.set(s * 0.18, 0.08, 0.15); headG.add(eye);
+        const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 6), new THREE.MeshStandardMaterial({ color: 0x111100 }));
+        pupil.position.set(s * 0.18, 0.08, 0.22); headG.add(pupil);
+      }
+      // Teeth
+      for (let ti = 0; ti < 6; ti++) {
+        const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.015, 0.08, 4), new THREE.MeshStandardMaterial({ color: 0xeeeedd }));
+        tooth.position.set(-0.08 + ti * 0.03, -0.15, 0.35 + Math.sin(ti) * 0.15);
+        tooth.rotation.x = Math.PI; headG.add(tooth);
+      }
+
+      const jawPivot = new THREE.Group();
+      jawPivot.position.set(0, -0.15, 0); headG.add(jawPivot);
+      const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.5), lmat);
+      jaw.position.set(0, -0.05, 0.2); jawPivot.add(jaw);
+
+      // Legs — long and bird-like
+      const legPivots: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[] = [];
+      for (const side of [-1, 1]) {
+        const thighPivot = new THREE.Group();
+        thighPivot.position.set(side * 0.25, 0.9, -0.1); group.add(thighPivot);
+        const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.2), bmat);
+        thigh.position.y = -0.35; thigh.castShadow = true; thighPivot.add(thigh);
+        const shinPivot = new THREE.Group();
+        shinPivot.position.y = -0.7; thighPivot.add(shinPivot);
+        const shin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.6, 0.12), lmat);
+        shin.position.y = -0.3; shinPivot.add(shin);
+        // Big killing claw on each foot
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.08, 0.3), bmat);
+        foot.position.set(0, -0.6, 0.08); shinPivot.add(foot);
+        const killClaw = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.25, 5), clawMat);
+        killClaw.position.set(0, -0.55, 0.3); killClaw.rotation.x = Math.PI / 2 + 0.3;
+        shinPivot.add(killClaw);
+        legPivots.push({ thighPivot, shinPivot, side });
+      }
+
+      // Arms with feathers
+      for (const side of [-1, 1]) {
+        const armPivot = new THREE.Group();
+        armPivot.position.set(side * 0.3, 1.4, 0.5); group.add(armPivot);
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.25, 0.08), bmat);
+        arm.position.y = -0.12; armPivot.add(arm);
+        // Feather fan on arm
+        for (let fi = 0; fi < 4; fi++) {
+          const f = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.18, 0.12), new THREE.MeshStandardMaterial({ color: vc.light + 0x202020 }));
+          f.position.set(side * 0.06, -0.1 - fi * 0.04, fi * 0.04);
+          armPivot.add(f);
+        }
+        const claw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.1, 4), clawMat);
+        claw.position.set(0, -0.3, 0); claw.rotation.x = Math.PI; armPivot.add(claw);
+        armPivot.rotation.z = side * 0.6;
+      }
+
+      // Tail — long and stiff
+      const tailPivots: THREE.Group[] = [];
+      let tp2: THREE.Object3D = bodyGroup;
+      for (let ti = 0; ti < 6; ti++) {
+        const pivot = new THREE.Group();
+        pivot.position.set(0, 0, ti === 0 ? -0.9 : -0.35);
+        tp2.add(pivot);
+        const sc = 1 - ti * 0.12;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.15 * sc, 0.12 * sc, 0.35), bmat);
+        pivot.add(seg);
+        tailPivots.push(pivot);
+        tp2 = pivot;
+      }
+
+      group.scale.set(2, 2, 2);
+      const cx = (Math.random() - 0.5) * 800;
+      const cz = (Math.random() - 0.5) * 800;
+      group.position.set(cx, this.getTerrainHeight(cx, cz), cz);
+      group.rotation.y = Math.random() * Math.PI * 2;
+      this.scene3d.add(group);
+      this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 40 + Math.random() * 20, driver: 'none', legPivots, tailPivots, jawPivot, neckBase, neckMid, bodyGroup, runPhase: Math.random() * Math.PI * 2 });
+    }
+
+    // === STEGOSAURUS (4) — plates on back, spiked tail ===
+    const stegoColors = [
+      { body: 0x5a6a3a, light: 0x7a8a5a },
+      { body: 0x6a5a4a, light: 0x8a7a6a },
+    ];
+    for (let i = 0; i < 4; i++) {
+      const group = new THREE.Group();
+      const sc2 = stegoColors[i % stegoColors.length];
+      const bmat = new THREE.MeshStandardMaterial({ color: sc2.body, roughness: 0.85 });
+      const lmat = new THREE.MeshStandardMaterial({ color: sc2.light, roughness: 0.8 });
+      const plateMat = new THREE.MeshStandardMaterial({ color: 0x8a5a3a, roughness: 0.7 });
+      const spikeMat = new THREE.MeshStandardMaterial({ color: 0xddccaa, roughness: 0.3, metalness: 0.1 });
+
+      const bodyGroup = new THREE.Group();
+      bodyGroup.position.y = 2.0; group.add(bodyGroup);
+      // Big round body — arched back
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.4, 3.5), bmat);
+      body.castShadow = true; bodyGroup.add(body);
+      const belly = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.4, 3.0), lmat);
+      belly.position.y = -0.6; bodyGroup.add(belly);
+
+      // Back plates — two rows of diamond shapes
+      for (let pi = -4; pi <= 4; pi++) {
+        const size = 0.4 + Math.sin((pi + 4) * 0.35) * 0.25;
+        const plate = new THREE.Mesh(new THREE.BoxGeometry(0.08, size, size * 0.7), plateMat);
+        plate.position.set(0, 0.9 + size * 0.3, pi * 0.38);
+        plate.rotation.z = Math.PI * 0.25;
+        bodyGroup.add(plate);
+      }
+
+      // Small head on long low neck
+      const neckBase = new THREE.Group();
+      neckBase.position.set(0, -0.2, 1.9); bodyGroup.add(neckBase);
+      const neck = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.8), bmat);
+      neckBase.add(neck);
+      const neckMid = new THREE.Group();
+      neckMid.position.set(0, 0, 0.5); neckBase.add(neckMid);
+      const headG = new THREE.Group();
+      headG.position.set(0, 0.1, 0.4); neckMid.add(headG);
+      const skull = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 0.5), bmat);
+      headG.add(skull);
+      const beak = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), lmat);
+      beak.position.z = 0.35; headG.add(beak);
+      for (const s of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 6), new THREE.MeshStandardMaterial({ color: 0x332211 }));
+        eye.position.set(s * 0.18, 0.05, 0.15); headG.add(eye);
+      }
+      const jawPivot = new THREE.Group();
+      jawPivot.position.set(0, -0.12, 0); headG.add(jawPivot);
+      const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.1, 0.45), lmat);
+      jaw.position.set(0, -0.05, 0.15); jawPivot.add(jaw);
+
+      // 4 thick legs
+      const legPivots: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[] = [];
+      for (const side of [-1, 1]) {
+        for (const fz of [-1.0, 0.8]) {
+          const thighPivot = new THREE.Group();
+          thighPivot.position.set(side * 0.8, 1.6, fz); group.add(thighPivot);
+          const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.1, 0.5), bmat);
+          thigh.position.y = -0.55; thigh.castShadow = true; thighPivot.add(thigh);
+          const shinPivot = new THREE.Group();
+          shinPivot.position.y = -1.0; thighPivot.add(shinPivot);
+          const shin = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.7, 0.4), lmat);
+          shin.position.y = -0.35; shinPivot.add(shin);
+          const foot = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.12, 0.45), bmat);
+          foot.position.set(0, -0.7, 0); shinPivot.add(foot);
+          legPivots.push({ thighPivot, shinPivot, side });
+        }
+      }
+
+      // Spiked tail — the thagomizer!
+      const tailPivots: THREE.Group[] = [];
+      let tp3: THREE.Object3D = bodyGroup;
+      for (let ti = 0; ti < 6; ti++) {
+        const pivot = new THREE.Group();
+        pivot.position.set(0, 0, ti === 0 ? -1.9 : -0.5);
+        tp3.add(pivot);
+        const sc = 1 - ti * 0.12;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.5 * sc, 0.4 * sc, 0.55), bmat);
+        pivot.add(seg);
+        tailPivots.push(pivot);
+        tp3 = pivot;
+      }
+      // 4 tail spikes at the end
+      for (const s of [-1, 1]) {
+        for (const ud of [-1, 1]) {
+          const spike = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.7, 5), spikeMat);
+          spike.position.set(s * 0.2, ud * 0.15, -0.3);
+          spike.rotation.x = Math.PI / 2 + ud * 0.3;
+          spike.rotation.z = s * 0.3;
+          tp3.add(spike);
+        }
+      }
+
+      group.scale.set(2.5, 2.5, 2.5);
+      const cx = (Math.random() - 0.5) * 800;
+      const cz = (Math.random() - 0.5) * 800;
+      group.position.set(cx, this.getTerrainHeight(cx, cz), cz);
+      group.rotation.y = Math.random() * Math.PI * 2;
+      this.scene3d.add(group);
+      this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 15 + Math.random() * 10, driver: 'none', legPivots, tailPivots, jawPivot, neckBase, neckMid, bodyGroup, runPhase: Math.random() * Math.PI * 2 });
     }
   }
 
@@ -3491,9 +4589,27 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.x += car.vx * dt;
         car.mesh.position.z += car.vz * dt;
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
-        // Sync player pos to car
+        // Sync player pos to car — show player sitting on top
         this.playerPos.set(car.mesh.position.x, car.mesh.position.y, car.mesh.position.z);
-        this.playerModel.visible = false;
+        this.playerModel.visible = true;
+        const seatBounce = Math.abs(Math.sin((car.runPhase || 0))) * 0.15;
+        // Seat height — sit right on the dino's back
+        const dinoScale = car.mesh.scale.y;
+        const bodyY = car.bodyGroup ? car.bodyGroup.position.y : 2.0;
+        const bodyHalfH = 0.7; // half the body mesh height roughly
+        const seatHeight = (bodyY + bodyHalfH) * dinoScale;
+        this.playerModel.position.set(car.mesh.position.x, car.mesh.position.y + seatHeight + seatBounce, car.mesh.position.z);
+        this.playerModel.rotation.y = this.lookAngle + Math.PI;
+        // Riding pose — sitting with legs in stirrups, arms holding reins
+        this.pLeftThigh.rotation.x = -1.4;
+        this.pRightThigh.rotation.x = -1.4;
+        this.pLeftShin.rotation.x = 1.2;
+        this.pRightShin.rotation.x = 1.2;
+        // Arms forward holding reins
+        this.pLeftUpperArm.rotation.x = -0.8;
+        this.pLeftForearm.rotation.x = -0.6;
+        this.pRightUpperArm.rotation.x = -0.8;
+        this.pRightForearm.rotation.x = -0.6;
         // Update engine pitch based on actual speed
         const actualSpd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
       } else if (typeof car.driver === 'number') {
@@ -3522,18 +4638,7 @@ export class BattleScene extends Phaser.Scene {
             tz = this.npcs[j].mesh.position.z;
           }
         }
-        // Only chase player if no NPCs around
-        if (bestDist > 50) {
-          const pd = Math.sqrt(
-            (this.playerPos.x - car.mesh.position.x) ** 2 +
-            (this.playerPos.z - car.mesh.position.z) ** 2
-          );
-          if (pd < 30) {
-            bestDist = pd;
-            tx = this.playerPos.x;
-            tz = this.playerPos.z;
-          }
-        }
+        // T-Rex does NOT chase the player — only NPCs
 
         const ddx = tx - car.mesh.position.x;
         const ddz = tz - car.mesh.position.z;
@@ -3546,15 +4651,16 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.x += car.vx * dt;
         car.mesh.position.z += car.vz * dt;
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
-        if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz) + Math.PI;
+        if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz);
 
         // Sync NPC pos to car
         npc.mesh.position.copy(car.mesh.position);
         // Update NPC car engine pitch
         const npcSpd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
       } else {
-        // No driver — car sits still
-        continue;
+        // No driver — wild T-Rex stands still, waiting to be ridden
+        car.vx = 0;
+        car.vz = 0;
       }
 
       // Bounce off world edges
@@ -3567,33 +4673,9 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.z = Math.sign(car.mesh.position.z) * 449;
       }
 
-      // Player touches T-Rex
-      if (car.driver !== 'player') {
-        const dx = this.playerPos.x - car.mesh.position.x;
-        const dz = this.playerPos.z - car.mesh.position.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 2.5 && this.playerInCar === -1) {
-          if (typeof car.driver === 'string' && car.driver === 'none') {
-            // Empty T-Rex — mount it
-            car.driver = 'player';
-            this.playerInCar = ci;
-            this.playerModel.visible = false;
-            this.showPickupMsg('Riding T-Rex! W to go, E to dismount');
-          } else {
-            // Ridden T-Rex attacks player — EATEN
-            this.playerHP = Math.max(0, this.playerHP - 40);
-            this.playSfx('carHit', 0.6);
-            this.hpText.textContent = `HP: ${this.playerHP}`;
-            this.playerPos.x += (dx / dist) * 8;
-            this.playerPos.z += (dz / dist) * 8;
-            if (this.playerHP <= 0) {
-              this.showGameOver('EATEN BY A T-REX');
-            }
-          }
-        }
-      }
+      // T-Rex doesn't attack player — just roams around
 
-      // T-Rex eats NPCs (not the rider)
+      // T-Rex stomps NPCs (not the rider)
       for (let ni = 0; ni < this.npcs.length; ni++) {
         const npc = this.npcs[ni];
         if (npc.dead || ni === car.driver) continue;
@@ -3606,7 +4688,7 @@ export class BattleScene extends Phaser.Scene {
           npc.hp = 0;
           npc.dead = true;
           this.coinsEarned += 1000;
-          this.showPickupMsg('T-Rex ate them! +1000 coins!');
+          this.showPickupMsg('T-Rex stomped them! +1000 coins!');
           this.spawnDeathFluff(npc.mesh.position.clone());
           this.scene3d.remove(npc.mesh);
         }
@@ -3636,15 +4718,17 @@ export class BattleScene extends Phaser.Scene {
         }
       }
 
-      // Running animation
+      // Running animation — works for all dino types
       const spd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
-      if (spd > 1 && car.legPivots && car.armPivots && car.tailPivots) {
+      if (spd > 1 && car.legPivots) {
         car.runPhase = (car.runPhase || 0) + dt * 7;
         const rc = car.runPhase;
 
         // Body bounce
         if (car.bodyGroup) {
-          car.bodyGroup.position.y = 2.4 + Math.abs(Math.sin(rc)) * 0.15;
+          const baseY = car.bodyGroup.userData.baseY ?? car.bodyGroup.position.y;
+          car.bodyGroup.userData.baseY = baseY;
+          car.bodyGroup.position.y = baseY + Math.abs(Math.sin(rc)) * 0.15;
           car.bodyGroup.rotation.x = Math.sin(rc) * 0.03;
         }
 
@@ -3670,18 +4754,25 @@ export class BattleScene extends Phaser.Scene {
           leg.shinPivot.rotation.x = backSwing * 0.8;
         }
 
-        // Arms bounce
-        for (let ai = 0; ai < car.armPivots.length; ai++) {
-          const phase = rc + (ai === 0 ? Math.PI : 0);
-          car.armPivots[ai].rotation.x = -0.3 + Math.sin(phase) * 0.3;
+        // Arms bounce (T-Rex only)
+        if (car.armPivots) {
+          for (let ai = 0; ai < car.armPivots.length; ai++) {
+            const phase = rc + (ai === 0 ? Math.PI : 0);
+            car.armPivots[ai].rotation.x = -0.3 + Math.sin(phase) * 0.3;
+          }
         }
 
         // Tail wave
-        for (let ti = 0; ti < car.tailPivots.length; ti++) {
-          const delay = ti * 0.4;
-          car.tailPivots[ti].rotation.y = Math.sin(rc + delay) * (0.12 + ti * 0.02);
-          car.tailPivots[ti].rotation.x = Math.sin(rc * 0.5 + delay) * 0.03;
+        if (car.tailPivots) {
+          for (let ti = 0; ti < car.tailPivots.length; ti++) {
+            const delay = ti * 0.4;
+            car.tailPivots[ti].rotation.y = Math.sin(rc + delay) * (0.12 + ti * 0.02);
+            car.tailPivots[ti].rotation.x = Math.sin(rc * 0.5 + delay) * 0.03;
+          }
         }
+      } else if (spd <= 1) {
+        // Reset to idle pose when stopped
+        car.runPhase = car.runPhase || 0;
       }
     }
   }
@@ -3844,27 +4935,28 @@ export class BattleScene extends Phaser.Scene {
     tongue.scale.set(0.8, 0.3, 1.2);
     head.add(tongue);
 
-    // Teeth — upper row with varying sizes
-    const toothSizes = [0.08, 0.1, 0.12, 0.15, 0.12, 0.1, 0.08];
+    // Teeth — upper row with varying sizes (big and scary)
+    const toothMat = new THREE.MeshStandardMaterial({ color: 0xffffee, roughness: 0.15, metalness: 0.1 });
+    const toothSizes = [0.14, 0.18, 0.22, 0.28, 0.22, 0.18, 0.14];
     for (let t = 0; t < toothSizes.length; t++) {
-      const x = (t - 3) * 0.09;
-      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.04, toothSizes[t], 4), clawMat);
-      tooth.position.set(x, -0.38, 1.35 - Math.abs(t - 3) * 0.02);
+      const x = (t - 3) * 0.11;
+      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.06, toothSizes[t], 5), toothMat);
+      tooth.position.set(x, -0.35, 1.4 - Math.abs(t - 3) * 0.03);
       tooth.rotation.x = Math.PI;
       head.add(tooth);
     }
     // Lower teeth
-    for (let t = -2; t <= 2; t++) {
-      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.1, 4), clawMat);
-      tooth.position.set(t * 0.09, -0.52, 1.25);
+    for (let t = -3; t <= 3; t++) {
+      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 5), toothMat);
+      tooth.position.set(t * 0.09, -0.55, 1.3 - Math.abs(t) * 0.02);
       head.add(tooth);
     }
-    // Canine fangs (big, curved)
+    // Canine fangs (huge, curved, terrifying)
     for (const side of [-1, 1]) {
-      const fang = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.4, 5), clawMat);
-      fang.position.set(side * 0.25, -0.45, 1.25);
-      fang.rotation.x = Math.PI + 0.15;
-      fang.rotation.z = side * -0.1;
+      const fang = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.65, 6), toothMat);
+      fang.position.set(side * 0.28, -0.42, 1.3);
+      fang.rotation.x = Math.PI + 0.2;
+      fang.rotation.z = side * -0.12;
       head.add(fang);
     }
 
@@ -4030,6 +5122,92 @@ export class BattleScene extends Phaser.Scene {
 
     // Collider
     this.colliders.push({ x: bx, z: bz, r: 7 });
+  }
+
+  private updateTRexEatAnim(dt: number): void {
+    const ea = this.trexEatAnim;
+    if (!ea.active) return;
+    ea.timer += dt;
+    const car = this.cars[ea.trexIndex];
+    if (!car) { ea.active = false; return; }
+
+    // Face player toward the T-Rex
+    const tdx = car.mesh.position.x - this.playerPos.x;
+    const tdz = car.mesh.position.z - this.playerPos.z;
+    this.playerModel.rotation.y = Math.atan2(tdx, tdz);
+
+    if (ea.phase === 'jump') {
+      // Player jumps HIGH, arms and legs flail in terror
+      const jumpT = Math.min(ea.timer / 0.8, 1); // 0.8s jump (slower so you see it)
+      const jumpHeight = Math.sin(jumpT * Math.PI) * 4; // jump 4 units high
+      this.playerModel.position.y = ea.startY + jumpHeight;
+
+      // Arms up in horror — waving
+      const wave = Math.sin(ea.timer * 20) * 0.3;
+      this.pLeftUpperArm.rotation.x = -2.8 + wave;
+      this.pLeftUpperArm.rotation.z = 0.9;
+      this.pRightUpperArm.rotation.x = -2.8 - wave;
+      this.pRightUpperArm.rotation.z = -0.9;
+      this.pLeftForearm.rotation.x = -0.8 + wave;
+      this.pRightForearm.rotation.x = -0.8 - wave;
+      // Legs kicking in panic
+      this.pLeftThigh.rotation.x = -0.5 + Math.sin(ea.timer * 15) * 0.4;
+      this.pLeftThigh.rotation.z = 0.5;
+      this.pRightThigh.rotation.x = -0.5 + Math.sin(ea.timer * 15 + 2) * 0.4;
+      this.pRightThigh.rotation.z = -0.5;
+
+      // T-Rex opens jaw WIDE
+      if (car.jawPivot) {
+        car.jawPivot.rotation.x = jumpT * 1.2; // wide open
+      }
+
+      if (ea.timer >= 0.8) {
+        ea.phase = 'chomp';
+        ea.timer = 0;
+      }
+    } else if (ea.phase === 'chomp') {
+      // T-Rex snaps jaw shut — CHOMP!
+      const chompT = Math.min(ea.timer / 0.15, 1);
+      if (car.jawPivot) {
+        car.jawPivot.rotation.x = 1.2 * (1 - chompT); // snap shut hard
+      }
+      // Player drops into mouth
+      this.playerModel.position.y = ea.startY + 4 * (1 - chompT);
+      // Keep flailing
+      this.pLeftUpperArm.rotation.x = -2.8;
+      this.pRightUpperArm.rotation.x = -2.8;
+
+      if (ea.timer >= 0.15) {
+        ea.phase = 'swallow';
+        ea.timer = 0;
+        // Hide player — eaten!
+        this.playerModel.visible = false;
+        // Apply damage
+        this.playerHP = Math.max(0, this.playerHP - ea.damage);
+        this.hpText.textContent = `HP: ${this.playerHP}`;
+      }
+    } else if (ea.phase === 'swallow') {
+      // T-Rex chews briefly then spits out
+      if (car.jawPivot) {
+        // Chewing motion
+        car.jawPivot.rotation.x = Math.sin(ea.timer * 12) * 0.15;
+      }
+      if (ea.timer >= 0.6) {
+        ea.active = false;
+        if (car.jawPivot) car.jawPivot.rotation.x = 0;
+        // Spit player out — fling away from T-Rex
+        const dx = this.playerPos.x - car.mesh.position.x;
+        const dz = this.playerPos.z - car.mesh.position.z;
+        const dist = Math.sqrt(dx * dx + dz * dz) || 1;
+        this.playerPos.x += (dx / dist) * 10;
+        this.playerPos.z += (dz / dist) * 10;
+        this.playerModel.visible = true;
+        this.playerModel.position.y = ea.startY;
+        if (this.playerHP <= 0) {
+          this.showGameOver('STOMPED BY A T-REX');
+        }
+      }
+    }
   }
 
   private updateBearBoss(dt: number): void {
@@ -4425,7 +5603,7 @@ export class BattleScene extends Phaser.Scene {
       this.showPickupMsg('Exited car');
     } else {
       // Find nearest empty car
-      let bestIdx = -1, bestDist = 5; // must be within 5 units
+      let bestIdx = -1, bestDist = 12; // must be within 12 units
       for (let i = 0; i < this.cars.length; i++) {
         if (this.cars[i].driver !== 'none') continue;
         const dx = this.playerPos.x - this.cars[i].mesh.position.x;
@@ -4436,8 +5614,8 @@ export class BattleScene extends Phaser.Scene {
       if (bestIdx >= 0) {
         this.cars[bestIdx].driver = 'player';
         this.playerInCar = bestIdx;
-        this.playerModel.visible = false;
-        this.showPickupMsg('Driving! W to go, E to exit');
+        this.playerModel.visible = true;
+        this.showPickupMsg('Riding T-Rex! Tap again to dismount');
       }
     }
   }
@@ -4600,6 +5778,8 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private updatePlayer(dt: number): void {
+    // Freeze player during T-Rex eat animation
+    if (this.trexEatAnim.active) return;
     const speed = 20;
     const forward = new THREE.Vector3(
       -Math.sin(this.lookAngle),
@@ -4659,16 +5839,54 @@ export class BattleScene extends Phaser.Scene {
     this.playerPos.x = Math.max(-490, Math.min(490, this.playerPos.x));
     this.playerPos.z = Math.max(-490, Math.min(490, this.playerPos.z));
 
-    // Update player model position and facing — follow terrain
-    const terrainY = this.getTerrainHeight(this.playerPos.x, this.playerPos.z);
-    this.playerModel.position.set(this.playerPos.x, terrainY, this.playerPos.z);
-    if (isMoving) {
-      const targetAngle = Math.atan2(move.x, move.z);
-      let diff = targetAngle - this.playerModel.rotation.y;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      this.playerModel.rotation.y += diff * Math.min(dt * 12, 1);
+    // Update player model position and facing — follow terrain or climb tower
+    let terrainY = this.getTerrainHeight(this.playerPos.x, this.playerPos.z);
+
+    // Eiffel Tower climbing — walk along legs + snap to platforms
+    const towerScale = 0.5;
+    const towerBaseSpread = 15 * towerScale;
+    const distFromCenter = Math.sqrt(this.playerPos.x ** 2 + this.playerPos.z ** 2);
+
+    // Platform definitions (height, walkable radius) — scaled
+    const platforms = [
+      { y: 25 * towerScale, r: 10 * towerScale },  // First floor — wide walkable area
+      { y: 48 * towerScale, r: 7 * towerScale },   // Second floor
+      { y: 68 * towerScale, r: 4 * towerScale },   // Top platform
+    ];
+
+    if (distFromCenter < towerBaseSpread + 2) {
+      const maxClimbH = 68 * towerScale;
+      const ratio = Math.max(0.001, distFromCenter / (15 * towerScale));
+
+      // Calculate leg height at this distance
+      let legY = terrainY;
+      if (ratio < 1) {
+        const t = Math.min(1, -Math.log(ratio) / 2.8);
+        legY = t * maxClimbH;
+      }
+
+      // Check platforms from highest to lowest — snap if within radius
+      // The player stays on a platform as long as they're within its radius
+      // and their climbing height has reached it
+      let onPlatform = false;
+      for (let pi = platforms.length - 1; pi >= 0; pi--) {
+        const plat = platforms[pi];
+        if (distFromCenter < plat.r && legY >= plat.y - 2) {
+          terrainY = Math.max(terrainY, plat.y);
+          onPlatform = true;
+          break;
+        }
+      }
+
+      // If not on platform, follow the leg curve (climbing)
+      if (!onPlatform && legY > terrainY && legY < maxClimbH + 5) {
+        terrainY = Math.max(terrainY, legY);
+      }
     }
+
+    this.playerModel.position.set(this.playerPos.x, terrainY, this.playerPos.z);
+    // Player always faces camera direction (like Fortnite)
+    this.playerModel.rotation.y = this.lookAngle + Math.PI;
 
     // === PLAYER ANIMATION (same as NPCs) ===
     const targetSpeed = isMoving ? speed : 0;
@@ -4677,63 +5895,88 @@ export class BattleScene extends Phaser.Scene {
     const runBlend = Math.min(spd / 3, 1);
     const sprintBlend = Math.max(0, (spd - 3) / 2);
 
-    this.playerPhase += dt * (4 + spd * 0.8);
+    this.playerPhase += dt * (8 + spd * 1.6);
     const p = this.playerPhase;
     const sinP = Math.sin(p);
     const cosP = Math.cos(p);
     const t = this.clock.elapsedTime;
 
     // Hips
-    const hipBob = isMoving ? Math.abs(sinP) * 0.06 * runBlend : 0;
-    this.pHips.position.y = 0.95 + hipBob + Math.sin(t * 1.5) * 0.008;
-    this.pHips.rotation.z = isMoving ? sinP * 0.03 * runBlend : Math.sin(t * 0.8) * 0.01;
-    this.pHips.rotation.y = isMoving ? sinP * 0.08 * runBlend : 0;
+    const hipBob = isMoving ? Math.abs(sinP) * 0.04 * runBlend : 0;
+    this.pHips.position.y = 0.95 + hipBob;
+    this.pHips.rotation.z = 0;
+    this.pHips.rotation.y = 0;
 
-    // Torso
-    this.pTorso.rotation.x = runBlend * (0.08 + sprintBlend * 0.06);
-    this.pTorso.rotation.y = isMoving ? -sinP * 0.06 * runBlend : 0;
+    // Torso — slight lean forward when running
+    this.pTorso.rotation.x = isMoving ? 0.06 * runBlend : 0;
+    this.pTorso.rotation.y = 0;
 
     // Head
-    this.pHead.rotation.x = isMoving ? -runBlend * 0.05 + cosP * 0.02 * runBlend : Math.sin(t * 0.7) * 0.015;
+    this.pHead.rotation.x = 0;
 
-    // Legs
-    const legSwing = 0.6 + sprintBlend * 0.3;
-    const kneeMax = 0.8 + sprintBlend * 0.4;
-    this.pLeftThigh.rotation.x = isMoving ? sinP * legSwing * runBlend : 0;
-    this.pLeftShin.rotation.x = isMoving ? Math.max(0, sinP) * kneeMax * runBlend : 0;
-    this.pRightThigh.rotation.x = isMoving ? -sinP * legSwing * runBlend : 0;
-    this.pRightShin.rotation.x = isMoving ? Math.max(0, -sinP) * kneeMax * runBlend : 0;
+    // Legs — fast pumping run cycle
+    const legSwing = 0.8 * runBlend;
+    this.pLeftThigh.rotation.x = isMoving ? sinP * legSwing : 0;
+    this.pLeftShin.rotation.x = isMoving ? Math.max(0, sinP) * 1.0 * runBlend : 0;
+    this.pRightThigh.rotation.x = isMoving ? -sinP * legSwing : 0;
+    this.pRightShin.rotation.x = isMoving ? Math.max(0, -sinP) * 1.0 * runBlend : 0;
 
-    // Arms
-    const armSwing = 0.5 + sprintBlend * 0.35;
-    const elbowBend = 0.6 + sprintBlend * 0.3;
-    this.pLeftUpperArm.rotation.x = isMoving ? -sinP * armSwing * runBlend : Math.sin(t * 0.5) * 0.02;
-    this.pLeftForearm.rotation.x = isMoving ? -elbowBend * runBlend - Math.abs(sinP) * 0.3 * runBlend : -0.05;
-    this.pRightUpperArm.rotation.x = isMoving ? sinP * armSwing * runBlend * 0.6 : Math.sin(t * 0.5 + 1) * 0.02;
-    this.pRightForearm.rotation.x = isMoving ? -elbowBend * 0.8 * runBlend - Math.abs(cosP) * 0.2 * runBlend : -0.3;
+    // Arms — big pumping swings
+    const armSwing = 0.7 * runBlend;
+    this.pLeftUpperArm.rotation.x = isMoving ? sinP * armSwing : 0;
+    this.pLeftUpperArm.rotation.z = 0;
+    this.pLeftForearm.rotation.x = isMoving ? -0.7 * runBlend : 0;
+    this.pRightUpperArm.rotation.x = isMoving ? -sinP * armSwing : 0;
+    this.pRightUpperArm.rotation.z = 0;
+    this.pRightForearm.rotation.x = isMoving ? -0.7 * runBlend : 0;
 
-    // === THIRD PERSON CAMERA — behind and above player ===
-    const camDist = 5;
-    const camHeight = 2.5;
-    const camOffsetX = 1; // slight right offset like Fortnite
+    // === THIRD PERSON CAMERA ===
+    // Intro: camera faces the player from the front
+    if (this.introCamera) {
+      this.introCameraTimer += dt;
+      if (isMoving) {
+        this.introCamera = false; // transition to behind on first move
+      }
+    }
 
-    const behindX = this.playerPos.x + Math.sin(this.lookAngle) * camDist + Math.cos(this.lookAngle) * camOffsetX;
-    const behindZ = this.playerPos.z + Math.cos(this.lookAngle) * camDist - Math.sin(this.lookAngle) * camOffsetX;
-    const camTerrainY = this.getTerrainHeight(behindX, behindZ);
-    const camY = Math.max(terrainY, camTerrainY) + camHeight + Math.sin(this.lookPitch) * 2;
+    const onTRex = this.playerInCar >= 0;
 
-    // Smooth camera follow
-    this.camera.position.x += (behindX - this.camera.position.x) * Math.min(dt * 10, 1);
-    this.camera.position.z += (behindZ - this.camera.position.z) * Math.min(dt * 10, 1);
-    this.camera.position.y += (camY - this.camera.position.y) * Math.min(dt * 10, 1);
+    if (this.introCamera) {
+      // Front-facing camera — shows your character's face
+      const frontDist = 3.5;
+      const frontHeight = 1.8;
+      const frontX = this.playerPos.x - Math.sin(this.lookAngle) * frontDist;
+      const frontZ = this.playerPos.z - Math.cos(this.lookAngle) * frontDist;
+      const frontY = terrainY + frontHeight;
 
-    // Camera looks at player's head area
-    const lookTarget = new THREE.Vector3(
-      this.playerPos.x - Math.sin(this.lookAngle) * 2,
-      terrainY + 1.5 + this.lookPitch * 0.5,
-      this.playerPos.z - Math.cos(this.lookAngle) * 2
-    );
-    this.camera.lookAt(lookTarget);
+      this.camera.position.x += (frontX - this.camera.position.x) * Math.min(dt * 5, 1);
+      this.camera.position.z += (frontZ - this.camera.position.z) * Math.min(dt * 5, 1);
+      this.camera.position.y += (frontY - this.camera.position.y) * Math.min(dt * 5, 1);
+
+      const lookTarget = new THREE.Vector3(this.playerPos.x, terrainY + 1.2, this.playerPos.z);
+      this.camera.lookAt(lookTarget);
+    } else {
+      // Normal behind camera
+      const camDist = onTRex ? 25 : 5;
+      const camHeight = onTRex ? 16 : 2.5;
+      const camOffsetX = onTRex ? 2 : 1;
+
+      const behindX = this.playerPos.x + Math.sin(this.lookAngle) * camDist + Math.cos(this.lookAngle) * camOffsetX;
+      const behindZ = this.playerPos.z + Math.cos(this.lookAngle) * camDist - Math.sin(this.lookAngle) * camOffsetX;
+      const camTerrainY = this.getTerrainHeight(behindX, behindZ);
+      const camY = Math.max(terrainY, camTerrainY) + camHeight + Math.sin(this.lookPitch) * 8;
+
+      this.camera.position.x += (behindX - this.camera.position.x) * Math.min(dt * 10, 1);
+      this.camera.position.z += (behindZ - this.camera.position.z) * Math.min(dt * 10, 1);
+      this.camera.position.y += (camY - this.camera.position.y) * Math.min(dt * 10, 1);
+
+      const lookTarget = new THREE.Vector3(
+        this.playerPos.x - Math.sin(this.lookAngle) * 2,
+        terrainY + 1.5 + this.lookPitch * 6,
+        this.playerPos.z - Math.cos(this.lookAngle) * 2
+      );
+      this.camera.lookAt(lookTarget);
+    }
   }
 
   private updateNPCs(dt: number): void {
@@ -5201,10 +6444,10 @@ export class BattleScene extends Phaser.Scene {
       if (dx * dx + dz * dz < pickRange * pickRange) {
         ch.picked = true;
         this.scene3d.remove(ch.group);
-        this.playerHP = Math.min(100, this.playerHP + 25);
+        this.playerHP = Math.min(this.playerMaxHP, this.playerHP + 25);
         this.hpText.textContent = 'HP: ' + this.playerHP;
-        if (this.playerHP >= 75) this.hpText.style.color = '#44ff44';
-        else if (this.playerHP >= 40) this.hpText.style.color = '#ffcc00';
+        if (this.playerHP >= this.playerMaxHP * 0.75) this.hpText.style.color = '#44ff44';
+        else if (this.playerHP >= this.playerMaxHP * 0.4) this.hpText.style.color = '#ffcc00';
         else this.hpText.style.color = '#ff4444';
         this.showPickupMsg('+25 HP from pizza!');
         this.playSfx('pickup', 0.5);
