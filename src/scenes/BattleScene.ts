@@ -5564,6 +5564,32 @@ export class BattleScene extends Phaser.Scene {
       if (keys['KeyS'] || keys['ArrowDown']) kz = 1;
       if (keys['KeyA'] || keys['ArrowLeft']) kx = -1;
       if (keys['KeyD'] || keys['ArrowRight']) kx = 1;
+
+      // Xbox controller support
+      const gamepads = navigator.getGamepads?.();
+      if (gamepads) {
+        for (let i = 0; i < gamepads.length; i++) {
+          const gp = gamepads[i];
+          if (!gp) continue;
+          // Left stick for looking around
+          if (Math.abs(gp.axes[0]) > 0.15) this.lookAngle -= gp.axes[0] * 0.05;
+          if (Math.abs(gp.axes[1]) > 0.15) this.lookPitch = Math.max(-1, Math.min(0.6, this.lookPitch - gp.axes[1] * 0.03));
+          // Right stick for movement
+          if (Math.abs(gp.axes[2]) > 0.15) kx = gp.axes[2];
+          if (Math.abs(gp.axes[3]) > 0.15) kz = gp.axes[3];
+          // R2 trigger (button 7) for forward
+          if (gp.buttons[7] && gp.buttons[7].value > 0.1) kz = -gp.buttons[7].value;
+          // L2 trigger (button 6) to stop
+          if (gp.buttons[6] && gp.buttons[6].value > 0.1) { kx = 0; kz = 0; }
+          // A button (button 0) to shoot
+          if (gp.buttons[0]?.pressed) this.tryShoot();
+          // Y button (button 3) for car toggle
+          if (gp.buttons[3]?.pressed && !(gp as any)._prevY) this.toggleCar();
+          (gp as any)._prevY = gp.buttons[3]?.pressed;
+          break; // use first connected controller
+        }
+      }
+
       if (kx !== 0 || kz !== 0) {
         const len = Math.sqrt(kx * kx + kz * kz);
         this.moveDir.x = kx / len;
