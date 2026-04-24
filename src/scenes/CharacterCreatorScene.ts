@@ -53,6 +53,11 @@ export class CharacterCreatorScene extends Phaser.Scene {
   private pantsT = 0.71;
 
   private hatSwatches: Phaser.GameObjects.Graphics[] = [];
+  private focusBorder!: Phaser.GameObjects.Graphics;
+  private focusedRow: number = 0; // 0=skin 1=hair 2=shirt 3=pants 4=hat 5=done
+  private rowBounds: { x: number; y: number; w: number; h: number }[] = [];
+  private sliderSetters: ((t: number) => void)[] = [];
+  private sliderTs: (() => number)[] = [];
 
   private shirtLabelDataUrl: string | null = null; // uploaded image
   private shirtLabelPlane: THREE.Mesh | null = null; // 3D plane on chest
@@ -62,6 +67,8 @@ export class CharacterCreatorScene extends Phaser.Scene {
 
   private nameInput: HTMLInputElement | null = null;
   private scrollContainer!: Phaser.GameObjects.Container;
+
+  private gpPrev: Record<string, boolean> = {};
 
   // 3D preview
   private previewRenderer!: THREE.WebGLRenderer;
@@ -185,6 +192,11 @@ export class CharacterCreatorScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.onDone());
 
+    // Focus border — drawn on top of the currently-focused row
+    this.focusBorder = this.add.graphics().setDepth(120);
+    // Done button is a focus target (registered last, after all slider rows)
+    // The bounds are pushed after the slider rows are set up below.
+
     // --- OPTIONS (right side, no scroll, all visible) ---
     const optionsX = 155;
     const optionsStartY = 36;
@@ -238,8 +250,20 @@ export class CharacterCreatorScene extends Phaser.Scene {
     const swatchGap = 22;
     rowY = this.addHatRow(labelX, swatchStartX, rowY, swatchGap);
 
+    // Register DONE button as a focus target (row index 5)
+    this.rowBounds.push({ x: btnX - 55, y: btnY - 15, w: 110, h: 30 });
 
+    this.applyRowFocus();
     this.cameras.main.fadeIn(400, 0, 0, 0);
+  }
+
+  private applyRowFocus(): void {
+    if (!this.focusBorder) return;
+    this.focusBorder.clear();
+    const b = this.rowBounds[this.focusedRow];
+    if (!b) return;
+    this.focusBorder.lineStyle(2, 0xffff55, 1);
+    this.focusBorder.strokeRoundedRect(b.x, b.y, b.w, b.h, 4);
   }
 
   private addColorBar(
@@ -314,6 +338,18 @@ export class CharacterCreatorScene extends Phaser.Scene {
       updateFromPointer(pointer.x);
     });
 
+    // Register row for gamepad focus
+    this.rowBounds.push({ x: barX - 4, y: barY - barH / 2 - 3, w: barWidth + 8, h: barH + 6 });
+    this.sliderTs.push(() => initialT);
+    let currentT = initialT;
+    const setT = (t: number) => {
+      currentT = Math.max(0, Math.min(1, t));
+      drawHandle(currentT);
+      onChange(currentT);
+    };
+    this.sliderSetters.push(setT);
+    this.sliderTs[this.sliderTs.length - 1] = () => currentT;
+
     return rowY + 22;
   }
 
@@ -360,6 +396,10 @@ export class CharacterCreatorScene extends Phaser.Scene {
       this.scrollContainer.add([g, hit]);
       this.hatSwatches.push(g);
     }
+
+    // Register hat row for gamepad focus (spans across all swatches)
+    const hatRowW = HAT_OPTIONS.length * swatchGap;
+    this.rowBounds.push({ x: swatchStartX - 10, y: swatchY - 11, w: hatRowW + 8, h: 22 });
 
     return rowY + 22;
   }
@@ -1028,6 +1068,71 @@ export class CharacterCreatorScene extends Phaser.Scene {
         name: sc.name,
         gender: sc.gender,
       });
+    }
+  }
+
+  update(_time: number, dt: number): void {
+    const pads = navigator.getGamepads?.();
+    if (!pads) return;
+    for (const gp of pads) {
+      if (!gp) continue;
+      const edge = (k: string, cur: boolean) => {
+        const prev = !!this.gpPrev[k]; this.gpPrev[k] = cur; return cur && !prev;
+      };
+      const ax = gp.axes[0] || 0;
+      const ay = gp.axes[1] || 0;
+      const up = !!gp.buttons[12]?.pressed || ay < -0.5;
+      const down = !!gp.buttons[13]?.pressed || ay > 0.5;
+      const left = !!gp.buttons[14]?.pressed;
+      const right = !!gp.buttons[15]?.pressed;
+      const rowCount = this.rowBounds.length;
+      const doneIdx = rowCount - 1;
+      const hatIdx = doneIdx - 1;
+
+      if (edge('up', up) && this.focusedRow > 0) { this.focusedRow--; this.applyRowFocus(); }
+      if (edge('down', down) && this.focusedRow < rowCount - 1) { this.focusedRow++; this.applyRowFocus(); }
+
+      // Left/right behavior depends on which row is focused
+      if (this.focusedRow < hatIdx) {
+        // Slider row — discrete press by D-pad, continuous by stick hold
+        if (edge('left', left) && this.sliderSetters[this.focusedRow]) {
+          this.sliderSetters[this.focusedRow](this.sliderTs[this.focusedRow]() - 0.05);
+        }
+        if (edge('right', right) && this.sliderSetters[this.focusedRow]) {
+          this.sliderSetters[this.focusedRow](this.sliderTs[this.focusedRow]() + 0.05);
+        }
+        // Continuous stick adjustment
+        if (Math.abs(ax) > 0.2 && this.sliderSetters[this.focusedRow]) {
+          const delta = (ax) * (dt / 1000) * 0.9;
+          this.sliderSetters[this.focusedRow](this.sliderTs[this.focusedRow]() + delta);
+        }
+      } else if (this.focusedRow === hatIdx) {
+        // Hat row — cycle through swatches (D-pad or stick edge)
+        const stickLeftEdge = edge('stickLeft', ax < -0.5);
+        const stickRightEdge = edge('stickRight', ax > 0.5);
+        if ((edge('left', left) || stickLeftEdge) && this.selectedHat > 0) {
+          this.selectedHat--;
+          this.rebuildHatSwatches();
+          this.updatePreviewColors();
+        }
+        if ((edge('right', right) || stickRightEdge) && this.selectedHat < HAT_OPTIONS.length - 1) {
+          this.selectedHat++;
+          this.rebuildHatSwatches();
+          this.updatePreviewColors();
+        }
+      }
+
+      // A → if Done row, finalize; else move focus to Done
+      if (edge('confirm', !!gp.buttons[0]?.pressed)) {
+        if (this.focusedRow === doneIdx) this.onDone();
+        else { this.focusedRow = doneIdx; this.applyRowFocus(); }
+      }
+      // B → back
+      if (edge('back', !!gp.buttons[1]?.pressed)) {
+        this.removeNameInput();
+        this.scene.start('CharacterSelectScene');
+      }
+      break;
     }
   }
 

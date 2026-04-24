@@ -2,9 +2,64 @@ import Phaser from 'phaser';
 import * as THREE from 'three';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
 import { CHAR_VISUALS } from './BattleScene';
+import { getCoins, spendCoins, addCoins } from '../utils/coinStore';
 
 const DRAW_KEY = 'fighting-wars-skin-drawing';
+const SKINS_LIST_KEY = 'fighting-wars-skins-list';
+const ACTIVE_SKIN_KEY = 'fighting-wars-active-skin-id';
 const TEX_SIZE = 32; // pixels per body part texture (pixelated like Minecraft)
+
+interface SavedSkin {
+  id: string;
+  name: string;
+  data: Record<string, (string | null)[][]>;
+  thumb?: string;
+}
+
+function getSkinsList(): SavedSkin[] {
+  try {
+    const raw = localStorage.getItem(SKINS_LIST_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (_e) { /* ignore */ }
+  // Migrate old single skin if it exists
+  const oldData = localStorage.getItem(DRAW_KEY);
+  if (oldData) {
+    try {
+      const data = JSON.parse(oldData);
+      const oldName = localStorage.getItem('fighting-wars-skin-name') || 'My Skin';
+      const oldThumb = localStorage.getItem('fighting-wars-skin-thumb') || undefined;
+      const skin: SavedSkin = { id: 'skin-0', name: oldName, data, thumb: oldThumb };
+      localStorage.setItem(SKINS_LIST_KEY, JSON.stringify([skin]));
+      localStorage.setItem(ACTIVE_SKIN_KEY, skin.id);
+      return [skin];
+    } catch (_e) { /* ignore */ }
+  }
+  return [];
+}
+
+function saveSkinsList(skins: SavedSkin[]): void {
+  localStorage.setItem(SKINS_LIST_KEY, JSON.stringify(skins));
+}
+
+function getActiveSkinId(): string | null {
+  return localStorage.getItem(ACTIVE_SKIN_KEY);
+}
+
+function setActiveSkinId(id: string | null): void {
+  if (id) {
+    localStorage.setItem(ACTIVE_SKIN_KEY, id);
+  } else {
+    localStorage.removeItem(ACTIVE_SKIN_KEY);
+  }
+}
+
+function getActiveSkinData(): Record<string, (string | null)[][]> | null {
+  const skins = getSkinsList();
+  const activeId = getActiveSkinId();
+  if (!activeId) return null;
+  const skin = skins.find(s => s.id === activeId);
+  return skin?.data || null;
+}
 
 export class DrawOnSkinScene extends Phaser.Scene {
   private currentColor = '#ff0000';
@@ -17,9 +72,107 @@ export class DrawOnSkinScene extends Phaser.Scene {
   private charRoot: THREE.Group | null = null;
   private raycaster = new THREE.Raycaster();
   private animId = 0;
+  private gpPrev: Record<string, boolean> = {};
+  // gamepad cursor in NDC (-1..1)
+  private gpCursorX = 0;
+  private gpCursorY = 0;
+  private gpColorIdx = 5; // red
+  private gpCursorEl: HTMLDivElement | null = null;
+  private gpPaintAtNdc: ((x: number, y: number) => boolean) | null = null;
+  private gpRotate: ((d: number) => void) | null = null;
+  private gpSetColorByIdx: ((idx: number) => void) | null = null;
+  private gpSetBrush: ((size: number) => void) | null = null;
+  private gpToggleEraser: (() => void) | null = null;
+  private gpClearAll: (() => void) | null = null;
+  private gpSave: (() => void) | null = null;
 
   constructor() {
     super({ key: 'DrawOnSkinScene' });
+  }
+
+  update(): void {
+    const pads = navigator.getGamepads?.();
+    if (!pads) return;
+    for (const gp of pads) {
+      if (!gp) continue;
+
+      // Back: B
+      const back = !!gp.buttons[1]?.pressed;
+      if (back && !this.gpPrev['back']) {
+        this.cleanup();
+        this.scene.start('CharacterSelectScene');
+        this.gpPrev['back'] = back;
+        return;
+      }
+      this.gpPrev['back'] = back;
+
+      // Left stick: move paint cursor in NDC space
+      const lx = gp.axes[0] || 0;
+      const ly = gp.axes[1] || 0;
+      const dz = 0.15;
+      const spd = 0.025;
+      if (Math.abs(lx) > dz) this.gpCursorX = Math.max(-1, Math.min(1, this.gpCursorX + lx * spd));
+      if (Math.abs(ly) > dz) this.gpCursorY = Math.max(-1, Math.min(1, this.gpCursorY - ly * spd));
+      if (this.gpCursorEl) {
+        const leftPct = ((this.gpCursorX + 1) / 2) * 100;
+        const topPct = ((1 - (this.gpCursorY + 1) / 2)) * 100;
+        this.gpCursorEl.style.left = leftPct + '%';
+        this.gpCursorEl.style.top = topPct + '%';
+        this.gpCursorEl.style.display = 'block';
+      }
+
+      // Right stick X: rotate model
+      const rx = gp.axes[2] || 0;
+      if (Math.abs(rx) > dz && this.gpRotate) this.gpRotate(rx * 0.04);
+
+      // A: paint (hold)
+      const paint = !!gp.buttons[0]?.pressed;
+      if (paint && this.gpPaintAtNdc) this.gpPaintAtNdc(this.gpCursorX, this.gpCursorY);
+      this.gpPrev['paint'] = paint;
+
+      // D-pad left/right: cycle colors (button 14/15)
+      const dl = !!gp.buttons[14]?.pressed;
+      const dr = !!gp.buttons[15]?.pressed;
+      if (dl && !this.gpPrev['dl'] && this.gpSetColorByIdx) {
+        this.gpColorIdx = (this.gpColorIdx + 24) % 25;
+        this.gpSetColorByIdx(this.gpColorIdx);
+      }
+      this.gpPrev['dl'] = dl;
+      if (dr && !this.gpPrev['dr'] && this.gpSetColorByIdx) {
+        this.gpColorIdx = (this.gpColorIdx + 1) % 25;
+        this.gpSetColorByIdx(this.gpColorIdx);
+      }
+      this.gpPrev['dr'] = dr;
+
+      // D-pad up/down: brush size (button 12/13)
+      const du = !!gp.buttons[12]?.pressed;
+      const dd = !!gp.buttons[13]?.pressed;
+      if (du && !this.gpPrev['du'] && this.gpSetBrush) {
+        this.gpSetBrush(Math.min(8, this.brushSize + 1));
+      }
+      this.gpPrev['du'] = du;
+      if (dd && !this.gpPrev['dd'] && this.gpSetBrush) {
+        this.gpSetBrush(Math.max(1, this.brushSize - 1));
+      }
+      this.gpPrev['dd'] = dd;
+
+      // Y: toggle eraser (button 3)
+      const yBtn = !!gp.buttons[3]?.pressed;
+      if (yBtn && !this.gpPrev['y'] && this.gpToggleEraser) this.gpToggleEraser();
+      this.gpPrev['y'] = yBtn;
+
+      // X: clear all (button 2)
+      const xBtn = !!gp.buttons[2]?.pressed;
+      if (xBtn && !this.gpPrev['x'] && this.gpClearAll) this.gpClearAll();
+      this.gpPrev['x'] = xBtn;
+
+      // Start/Menu: save (button 9)
+      const start = !!gp.buttons[9]?.pressed;
+      if (start && !this.gpPrev['start'] && this.gpSave) this.gpSave();
+      this.gpPrev['start'] = start;
+
+      break;
+    }
   }
 
   create(): void {
@@ -209,30 +362,34 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     scene.add(root);
 
-    // Load saved paint data
-    try {
-      const saved = localStorage.getItem(DRAW_KEY);
-      if (saved) {
-        const data = JSON.parse(saved);
-        if (data && typeof data === 'object' && !Array.isArray(data)) {
-          for (const [mesh, info] of paintableTextures) {
-            const partData = data[info.name];
-            if (partData && Array.isArray(partData)) {
-              for (let y = 0; y < TEX_SIZE; y++) {
-                for (let x = 0; x < TEX_SIZE; x++) {
-                  const color = partData[y]?.[x];
-                  if (color) {
-                    info.ctx.fillStyle = color;
-                    info.ctx.fillRect(x, y, 1, 1);
-                  }
-                }
+    // Load active skin data
+    let currentSkinId = getActiveSkinId();
+    const loadSkinData = (data: Record<string, (string | null)[][]> | null) => {
+      // Reset all to white first
+      for (const [, info] of paintableTextures) {
+        info.ctx.fillStyle = 'rgb(255,255,255)';
+        info.ctx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+        info.tex.needsUpdate = true;
+      }
+      if (!data) return;
+      for (const [, info] of paintableTextures) {
+        const partData = data[info.name];
+        if (partData && Array.isArray(partData)) {
+          for (let y = 0; y < TEX_SIZE; y++) {
+            for (let x = 0; x < TEX_SIZE; x++) {
+              const color = partData[y]?.[x];
+              if (color) {
+                info.ctx.fillStyle = color;
+                info.ctx.fillRect(x, y, 1, 1);
               }
-              info.tex.needsUpdate = true;
             }
           }
+          info.tex.needsUpdate = true;
         }
       }
-    } catch (_e) { /* ignore */ }
+    };
+    const activeData = getActiveSkinData();
+    loadSkinData(activeData);
 
     // === ROTATION + PAINTING ===
     let rotating = false;
@@ -254,8 +411,8 @@ export class DrawOnSkinScene extends Phaser.Scene {
       );
     };
 
-    const paintAt = (e: MouseEvent | TouchEvent) => {
-      const ndc = getNDC(e);
+    const paintAtNdc = (ndcX: number, ndcY: number): boolean => {
+      const ndc = new THREE.Vector2(ndcX, ndcY);
       this.raycaster.setFromCamera(ndc, camera);
       const meshes: THREE.Mesh[] = [];
       root.traverse(obj => { if (obj instanceof THREE.Mesh && paintableTextures.has(obj)) meshes.push(obj); });
@@ -289,6 +446,13 @@ export class DrawOnSkinScene extends Phaser.Scene {
       }
       return false;
     };
+
+    const paintAt = (e: MouseEvent | TouchEvent) => {
+      const ndc = getNDC(e);
+      return paintAtNdc(ndc.x, ndc.y);
+    };
+    this.gpPaintAtNdc = paintAtNdc;
+    this.gpRotate = (d: number) => { rotY += d; root.rotation.y = rotY; };
 
     const onStart = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
@@ -329,7 +493,15 @@ export class DrawOnSkinScene extends Phaser.Scene {
     canvas3d.addEventListener('touchmove', onMove, { passive: false });
     canvas3d.addEventListener('touchend', onEnd, { passive: false });
 
-    container.appendChild(canvas3d);
+    // Wrap canvas + cursor so cursor can be positioned relative to the canvas
+    const canvasWrap = document.createElement('div');
+    canvasWrap.style.cssText = 'position:relative;display:inline-block;';
+    canvasWrap.appendChild(canvas3d);
+    const cursorEl = document.createElement('div');
+    cursorEl.style.cssText = 'position:absolute;width:16px;height:16px;border:2px solid #ffff00;border-radius:50%;pointer-events:none;transform:translate(-50%,-50%);box-shadow:0 0 4px #000;display:none;';
+    canvasWrap.appendChild(cursorEl);
+    this.gpCursorEl = cursorEl;
+    container.appendChild(canvasWrap);
 
     // === CONTROLS ===
     const controls = document.createElement('div');
@@ -356,20 +528,31 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     const colorGrid = document.createElement('div');
     colorGrid.style.cssText = 'display:grid;grid-template-columns:repeat(5,1fr);gap:2px;';
+    const swatches: HTMLDivElement[] = [];
     for (const c of colors) {
       const swatch = document.createElement('div');
       swatch.style.cssText = `width:24px;height:24px;background:${c};border:2px solid #333;border-radius:2px;cursor:pointer;`;
       swatch.addEventListener('click', () => {
         this.currentColor = c;
         this.isEraser = false;
-        colorGrid.querySelectorAll('div').forEach(d => (d as HTMLDivElement).style.borderColor = '#333');
+        swatches.forEach(d => d.style.borderColor = '#333');
         swatch.style.borderColor = '#fff';
         eraserBtn.style.background = '#555';
       });
       if (c === '#ff0000') swatch.style.borderColor = '#fff';
+      swatches.push(swatch);
       colorGrid.appendChild(swatch);
     }
     controls.appendChild(colorGrid);
+    this.gpSetColorByIdx = (idx: number) => {
+      const c = colors[idx];
+      if (!c) return;
+      this.currentColor = c;
+      this.isEraser = false;
+      swatches.forEach(d => d.style.borderColor = '#333');
+      swatches[idx].style.borderColor = '#fff';
+      eraserBtn.style.background = '#555';
+    };
 
     // Brush size
     const sizeLabel = document.createElement('div');
@@ -388,16 +571,22 @@ export class DrawOnSkinScene extends Phaser.Scene {
       sizeLabel.textContent = `Brush: ${sizeSlider.value}`;
     });
     controls.appendChild(sizeSlider);
+    this.gpSetBrush = (size: number) => {
+      this.brushSize = size;
+      sizeSlider.value = String(size);
+      sizeLabel.textContent = `Brush: ${size}`;
+    };
 
     const eraserBtn = document.createElement('button');
     eraserBtn.textContent = 'ERASER';
     eraserBtn.style.cssText = 'padding:6px;font:bold 11px Arial;background:#555;color:#fff;border:none;border-radius:4px;cursor:pointer;';
     eraserBtn.addEventListener('click', () => {
       this.isEraser = true;
-      colorGrid.querySelectorAll('div').forEach(d => (d as HTMLDivElement).style.borderColor = '#333');
+      swatches.forEach(d => d.style.borderColor = '#333');
       eraserBtn.style.background = '#ff8844';
     });
     controls.appendChild(eraserBtn);
+    this.gpToggleEraser = () => { eraserBtn.click(); };
 
     const clearBtn = document.createElement('button');
     clearBtn.textContent = 'CLEAR ALL';
@@ -416,6 +605,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
       }
     });
     controls.appendChild(clearBtn);
+    this.gpClearAll = () => { clearBtn.click(); };
 
     // Skin name input
     const nameLabel = document.createElement('div');
@@ -423,52 +613,276 @@ export class DrawOnSkinScene extends Phaser.Scene {
     nameLabel.style.cssText = 'color:#aaa;font:bold 10px Arial;';
     controls.appendChild(nameLabel);
 
+    const skins = getSkinsList();
+    const activeSkin = skins.find(s => s.id === currentSkinId);
+
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
-    nameInput.value = localStorage.getItem('fighting-wars-skin-name') || 'My Skin';
+    nameInput.value = activeSkin?.name || 'My Skin';
     nameInput.maxLength = 20;
     nameInput.style.cssText = 'width:100%;padding:6px;font:bold 12px Arial;background:#333;color:#fff;border:2px solid #555;border-radius:4px;box-sizing:border-box;';
     controls.appendChild(nameInput);
 
-    const saveBtn = document.createElement('button');
-    saveBtn.textContent = 'SAVE SKIN';
-    saveBtn.style.cssText = 'padding:8px;font:bold 12px Arial;background:#22aa44;color:#fff;border:none;border-radius:4px;cursor:pointer;';
-    saveBtn.addEventListener('click', () => {
-      try {
-        // Save each body part's pixel data
-        const saveData: Record<string, (string | null)[][]> = {};
-        for (const [, info] of paintableTextures) {
-          const imgData = info.ctx.getImageData(0, 0, TEX_SIZE, TEX_SIZE);
-          const partPixels: (string | null)[][] = [];
-          for (let y = 0; y < TEX_SIZE; y++) {
-            partPixels[y] = [];
-            for (let x = 0; x < TEX_SIZE; x++) {
-              const i = (y * TEX_SIZE + x) * 4;
-              const r = imgData.data[i], g = imgData.data[i + 1], b = imgData.data[i + 2], a = imgData.data[i + 3];
-              if (a > 0) {
-                partPixels[y][x] = `rgb(${r},${g},${b})`;
-              } else {
-                partPixels[y][x] = null;
-              }
+    const getCurrentPixelData = (): Record<string, (string | null)[][]> => {
+      const saveData: Record<string, (string | null)[][]> = {};
+      for (const [, info] of paintableTextures) {
+        const imgData = info.ctx.getImageData(0, 0, TEX_SIZE, TEX_SIZE);
+        const partPixels: (string | null)[][] = [];
+        for (let y = 0; y < TEX_SIZE; y++) {
+          partPixels[y] = [];
+          for (let x = 0; x < TEX_SIZE; x++) {
+            const i = (y * TEX_SIZE + x) * 4;
+            const r = imgData.data[i], g = imgData.data[i + 1], b = imgData.data[i + 2], a = imgData.data[i + 3];
+            if (a > 0) {
+              partPixels[y][x] = `rgb(${r},${g},${b})`;
+            } else {
+              partPixels[y][x] = null;
             }
           }
-          saveData[info.name] = partPixels;
         }
+        saveData[info.name] = partPixels;
+      }
+      return saveData;
+    };
+
+    const getThumb = (): string => {
+      const savedRot = root.rotation.y;
+      root.rotation.y = 0;
+      renderer.render(scene, camera);
+      const url = canvas3d.toDataURL();
+      root.rotation.y = savedRot;
+      return url;
+    };
+
+    // Skins list panel
+    const skinsPanel = document.createElement('div');
+    skinsPanel.style.cssText = 'display:flex;flex-direction:column;gap:4px;max-width:120px;max-height:55vmin;overflow-y:auto;padding:4px;';
+
+    const skinsTitle = document.createElement('div');
+    skinsTitle.textContent = 'MY SKINS';
+    skinsTitle.style.cssText = 'color:#44aaff;font:bold 11px "Arial Black";text-align:center;';
+    skinsPanel.appendChild(skinsTitle);
+
+    // Coins display (created early so delete handlers can update it)
+    const coinLabel = document.createElement('div');
+    coinLabel.textContent = `${getCoins()} coins`;
+    coinLabel.style.cssText = 'color:#ffdd00;font:bold 11px Arial;text-align:center;';
+
+    const renderSkinsList = () => {
+      // Remove old entries (keep title)
+      while (skinsPanel.children.length > 1) skinsPanel.removeChild(skinsPanel.lastChild!);
+      const allSkins = getSkinsList();
+      for (const skin of allSkins) {
+        const entry = document.createElement('div');
+        const isActive = skin.id === currentSkinId;
+        entry.style.cssText = `display:flex;flex-direction:column;align-items:center;padding:4px;border:2px solid ${isActive ? '#44ff88' : '#444'};border-radius:6px;cursor:pointer;background:${isActive ? 'rgba(34,85,51,0.5)' : 'rgba(34,34,68,0.5)'};`;
+        // Thumbnail
+        if (skin.thumb) {
+          const img = document.createElement('img');
+          img.src = skin.thumb;
+          img.style.cssText = 'width:50px;height:40px;object-fit:contain;border-radius:3px;';
+          entry.appendChild(img);
+        }
+        const label = document.createElement('div');
+        label.textContent = skin.name;
+        label.style.cssText = 'color:#fff;font:bold 9px Arial;text-align:center;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        entry.appendChild(label);
+        // Click to load this skin
+        entry.addEventListener('click', () => {
+          // Save current first
+          if (currentSkinId) {
+            const curSkins = getSkinsList();
+            const cur = curSkins.find(s => s.id === currentSkinId);
+            if (cur) {
+              cur.data = getCurrentPixelData();
+              cur.name = nameInput.value || cur.name;
+              cur.thumb = getThumb();
+              saveSkinsList(curSkins);
+            }
+          }
+          currentSkinId = skin.id;
+          setActiveSkinId(skin.id);
+          nameInput.value = skin.name;
+          loadSkinData(skin.data);
+          renderSkinsList();
+        });
+        // Delete button — two-tap confirm, refunds 50 coins on delete
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = 'DELETE +50';
+        const delBtnNormal = 'padding:4px 6px;margin-top:4px;font:bold 10px Arial;background:#aa2222;color:#fff;border:none;border-radius:4px;cursor:pointer;width:100%;';
+        const delBtnConfirm = 'padding:4px 6px;margin-top:4px;font:bold 10px Arial;background:#ffcc00;color:#000;border:none;border-radius:4px;cursor:pointer;width:100%;';
+        delBtn.style.cssText = delBtnNormal;
+        let armed = false;
+        let armTimer: ReturnType<typeof setTimeout> | null = null;
+        const swallow = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
+        delBtn.addEventListener('mousedown', swallow);
+        delBtn.addEventListener('touchstart', swallow, { passive: false });
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          if (!armed) {
+            armed = true;
+            delBtn.textContent = 'TAP AGAIN';
+            delBtn.style.cssText = delBtnConfirm;
+            if (armTimer) clearTimeout(armTimer);
+            armTimer = setTimeout(() => {
+              armed = false;
+              delBtn.textContent = 'DELETE +50';
+              delBtn.style.cssText = delBtnNormal;
+            }, 2500);
+            return;
+          }
+          if (armTimer) clearTimeout(armTimer);
+          const curSkins = getSkinsList();
+          const idx = curSkins.findIndex(s => s.id === skin.id);
+          if (idx >= 0) {
+            curSkins.splice(idx, 1);
+            addCoins(50);
+            coinLabel.textContent = `${getCoins()} coins`;
+          }
+          saveSkinsList(curSkins);
+          if (currentSkinId === skin.id) {
+            currentSkinId = curSkins[0]?.id || null;
+            setActiveSkinId(currentSkinId);
+            loadSkinData(currentSkinId ? (curSkins[0]?.data || null) : null);
+            nameInput.value = curSkins[0]?.name || 'My Skin';
+          }
+          renderSkinsList();
+        });
+        entry.appendChild(delBtn);
+        skinsPanel.appendChild(entry);
+      }
+      // "NEW SKIN" button at bottom
+      const newBtn = document.createElement('button');
+      newBtn.textContent = '+ NEW SKIN';
+      newBtn.style.cssText = 'padding:6px;font:bold 10px Arial;background:#4488ff;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:4px;';
+      newBtn.addEventListener('click', () => {
+        // Save current first
+        if (currentSkinId) {
+          const curSkins = getSkinsList();
+          const cur = curSkins.find(s => s.id === currentSkinId);
+          if (cur) {
+            cur.data = getCurrentPixelData();
+            cur.name = nameInput.value || cur.name;
+            cur.thumb = getThumb();
+            saveSkinsList(curSkins);
+          }
+        }
+        // Create new blank skin
+        const curSkins = getSkinsList();
+        const newId = 'skin-' + Date.now();
+        const newSkin: SavedSkin = { id: newId, name: 'Skin ' + (curSkins.length + 1), data: {} };
+        curSkins.push(newSkin);
+        saveSkinsList(curSkins);
+        currentSkinId = newId;
+        setActiveSkinId(newId);
+        nameInput.value = newSkin.name;
+        loadSkinData(null);
+        renderSkinsList();
+      });
+      skinsPanel.appendChild(newBtn);
+    };
+    renderSkinsList();
+
+    // Coins display (created above so delete handlers can update it)
+    controls.appendChild(coinLabel);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.textContent = 'SAVE SKIN (50 coins)';
+    saveBtn.style.cssText = 'padding:8px;font:bold 12px Arial;background:#22aa44;color:#fff;border:none;border-radius:4px;cursor:pointer;';
+    saveBtn.addEventListener('click', () => {
+      // Check if this is an update to existing skin (free) or new save (costs 50)
+      const allSkins = getSkinsList();
+      const isUpdate = currentSkinId && allSkins.some(s => s.id === currentSkinId);
+      if (!isUpdate) {
+        // New skin — costs 50 coins
+        if (!spendCoins(50)) {
+          saveBtn.textContent = 'NOT ENOUGH COINS!';
+          saveBtn.style.background = '#aa2222';
+          setTimeout(() => { saveBtn.textContent = 'SAVE SKIN (50 coins)'; saveBtn.style.background = '#22aa44'; }, 1500);
+          return;
+        }
+        coinLabel.textContent = `${getCoins()} coins`;
+      }
+      try {
+        const saveData = getCurrentPixelData();
+        const thumb = getThumb();
+        if (isUpdate) {
+          const existing = allSkins.find(s => s.id === currentSkinId);
+          if (existing) {
+            existing.data = saveData;
+            existing.name = nameInput.value || existing.name;
+            existing.thumb = thumb;
+          }
+        } else {
+          const newId = 'skin-' + Date.now();
+          allSkins.push({ id: newId, name: nameInput.value || 'My Skin', data: saveData, thumb });
+          currentSkinId = newId;
+          setActiveSkinId(newId);
+        }
+        saveSkinsList(allSkins);
         localStorage.setItem(DRAW_KEY, JSON.stringify(saveData));
         localStorage.setItem('fighting-wars-skin-name', nameInput.value || 'My Skin');
-
-        // Also render a thumbnail for character select
-        root.rotation.y = 0;
-        renderer.render(scene, camera);
-        const thumbDataUrl = canvas3d.toDataURL();
-        localStorage.setItem('fighting-wars-skin-thumb', thumbDataUrl);
+        localStorage.setItem('fighting-wars-skin-thumb', thumb);
+        renderSkinsList();
       } catch (_e) { /* ignore */ }
       saveBtn.textContent = 'SAVED!';
-      setTimeout(() => { saveBtn.textContent = 'SAVE SKIN'; }, 1500);
+      setTimeout(() => { saveBtn.textContent = 'SAVE SKIN (50 coins)'; }, 1500);
     });
     controls.appendChild(saveBtn);
+    this.gpSave = () => { saveBtn.click(); };
+
+    // BIG obvious DELETE button for the currently-loaded skin (refunds 50 coins)
+    const deleteCurrentBtn = document.createElement('button');
+    deleteCurrentBtn.type = 'button';
+    const delNormalStyle = 'padding:10px;font:bold 13px "Arial Black";background:#cc2222;color:#fff;border:2px solid #ff6666;border-radius:6px;cursor:pointer;';
+    const delArmedStyle = 'padding:10px;font:bold 13px "Arial Black";background:#ffcc00;color:#000;border:2px solid #ff9900;border-radius:6px;cursor:pointer;';
+    deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+    deleteCurrentBtn.style.cssText = delNormalStyle;
+    let delArmed = false;
+    let delTimer: ReturnType<typeof setTimeout> | null = null;
+    deleteCurrentBtn.addEventListener('click', () => {
+      const allSkins = getSkinsList();
+      if (!currentSkinId || !allSkins.some(s => s.id === currentSkinId)) {
+        deleteCurrentBtn.textContent = 'NOTHING TO DELETE';
+        setTimeout(() => { deleteCurrentBtn.textContent = 'DELETE SKIN (+50)'; }, 1200);
+        return;
+      }
+      if (!delArmed) {
+        delArmed = true;
+        deleteCurrentBtn.textContent = 'TAP AGAIN TO DELETE';
+        deleteCurrentBtn.style.cssText = delArmedStyle;
+        if (delTimer) clearTimeout(delTimer);
+        delTimer = setTimeout(() => {
+          delArmed = false;
+          deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+          deleteCurrentBtn.style.cssText = delNormalStyle;
+        }, 2500);
+        return;
+      }
+      if (delTimer) clearTimeout(delTimer);
+      delArmed = false;
+      const curSkins = getSkinsList();
+      const idx = curSkins.findIndex(s => s.id === currentSkinId);
+      if (idx >= 0) {
+        curSkins.splice(idx, 1);
+        addCoins(50);
+        coinLabel.textContent = `${getCoins()} coins`;
+      }
+      saveSkinsList(curSkins);
+      currentSkinId = curSkins[0]?.id || null;
+      setActiveSkinId(currentSkinId);
+      loadSkinData(currentSkinId ? (curSkins[0]?.data || null) : null);
+      nameInput.value = curSkins[0]?.name || 'My Skin';
+      renderSkinsList();
+      deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+      deleteCurrentBtn.style.cssText = delNormalStyle;
+    });
+    controls.appendChild(deleteCurrentBtn);
 
     container.appendChild(controls);
+    container.appendChild(skinsPanel);
 
     // BACK button — top left corner, goes to shop
     const backBtn = document.createElement('button');
@@ -514,6 +928,14 @@ export class DrawOnSkinScene extends Phaser.Scene {
       this.overlayEl.parentNode.removeChild(this.overlayEl);
       this.overlayEl = null;
     }
+    this.gpCursorEl = null;
+    this.gpPaintAtNdc = null;
+    this.gpRotate = null;
+    this.gpSetColorByIdx = null;
+    this.gpSetBrush = null;
+    this.gpToggleEraser = null;
+    this.gpClearAll = null;
+    this.gpSave = null;
   }
 
   shutdown(): void {

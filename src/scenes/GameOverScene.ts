@@ -27,7 +27,7 @@ export class GameOverScene extends Phaser.Scene {
     // Description
     const desc = won
       ? 'You defeated the Apple Monster!\nThe forest is safe once more.'
-      : 'The Apple Monster squished you...\nBetter luck next time!';
+      : 'The Apple Monster got you...\nBetter luck next time!';
 
     this.add.text(GAME_WIDTH / 2, 140, desc, {
       fontSize: '16px',

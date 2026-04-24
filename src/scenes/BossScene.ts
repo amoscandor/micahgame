@@ -299,7 +299,6 @@ export class BossScene extends Phaser.Scene {
             this.playerHP = Math.max(0, this.playerHP - 1);
             this.playerHPText.setText(`Your HP: ${this.playerHP}`);
             this.flashSprite(this.playerSprite);
-            this.showMessage('SQUISHED!', 800);
             if (this.playerHP <= 0) { this.onPlayerDied(); return; }
           }
           this.tweens.add({
@@ -367,7 +366,7 @@ export class BossScene extends Phaser.Scene {
     });
     const earned = 100;
     const total = addCoins(earned);
-    this.showMessage('SQUISHED!\nThe Apple Monster wins...', 3000);
+    this.showMessage('The Apple Monster wins...', 3000);
     this.time.delayedCall(4000, () => {
       this.joystick.destroy();
       // cleanup

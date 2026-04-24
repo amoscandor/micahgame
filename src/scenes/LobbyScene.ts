@@ -26,7 +26,7 @@ export class LobbyScene extends Phaser.Scene {
     super({ key: 'LobbyScene' });
   }
 
-  create(data?: { characterKey?: string; characterName?: string; action?: 'create' | 'join'; roomCode?: string; mode?: string }): void {
+  create(data?: { characterKey?: string; characterName?: string; action?: 'create' | 'join' | 'auto'; roomCode?: string; mode?: string }): void {
     this.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'forest-bg')
       .setDisplaySize(GAME_WIDTH, GAME_HEIGHT);
     this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.5);
@@ -49,9 +49,30 @@ export class LobbyScene extends Phaser.Scene {
     if (data?.action === 'join' && data.roomCode) {
       this.showLobbyUI();
       this.joinRoom(data.roomCode);
+    } else if (data?.action === 'auto') {
+      this.showLobbyUI();
+      this.roomCodeText.setVisible(false);
+      this.autoMatch();
     } else {
       this.showChoiceScreen();
     }
+  }
+
+  // Fortnite-style auto-matchmaking: briefly scan for open rooms, join the
+  // fullest one found, or create a new public room if nothing is advertising.
+  private autoMatch(): void {
+    this.statusText.setText('Finding players...');
+    const seen = new Map<string, { code: string; hostName: string; playerCount: number; timestamp: number }>();
+    const stop = this.network.listenForRooms((room) => { seen.set(room.code, room); });
+    this.time.delayedCall(2500, () => {
+      stop();
+      const best = [...seen.values()].sort((a, b) => b.playerCount - a.playerCount)[0];
+      if (best) {
+        this.joinRoom(best.code);
+      } else {
+        this.createRoom();
+      }
+    });
   }
 
   // ── Choice screen: CREATE or browse rooms to JOIN ──
@@ -157,7 +178,7 @@ export class LobbyScene extends Phaser.Scene {
       const bg = this.add.rectangle(GAME_WIDTH / 2, y, GAME_WIDTH - 80, 40, 0x224488, 0.85)
         .setInteractive({ useHandCursor: true });
 
-      const label = `${room.hostName}'s Room  [${room.code}]  —  ${room.playerCount} player${room.playerCount === 1 ? '' : 's'}`;
+      const label = `${room.hostName}'s Room  —  ${room.playerCount} player${room.playerCount === 1 ? '' : 's'}`;
       const text = this.add.text(GAME_WIDTH / 2 - 120, y, label, {
         fontSize: '14px', fontFamily: 'Arial', color: '#ffffff',
       }).setOrigin(0, 0.5);
@@ -270,6 +291,8 @@ export class LobbyScene extends Phaser.Scene {
           this.network.send({ type: 'PLAYER_LIST', players: this.players, hostId: this.network.playerId });
           // Update room ad with new player count
           this.network.advertiseRoom(this.players.length);
+          // Auto-start the match the moment we have 2 players — no waiting.
+          if (this.players.length >= 2) this.startGame();
         }
         break;
       case 'PLAYER_LIST':

@@ -14,10 +14,11 @@ import { ShopHubScene } from './scenes/ShopHubScene';
 import { ArmorShopScene } from './scenes/ArmorShopScene';
 import { SettingsScene } from './scenes/SettingsScene';
 import { DrawOnSkinScene } from './scenes/DrawOnSkinScene';
+import { PetShopScene } from './scenes/PetShopScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   ...gameConfig,
-  scene: [BootScene, TitleScene, CharacterSelectScene, ModeSelectScene, LobbyScene, BattleScene, BossScene, GameOverScene, CharacterCreatorScene, CharacterShopScene, ShopHubScene, ArmorShopScene, SettingsScene, DrawOnSkinScene],
+  scene: [BootScene, TitleScene, CharacterSelectScene, ModeSelectScene, LobbyScene, BattleScene, BossScene, GameOverScene, CharacterCreatorScene, CharacterShopScene, ShopHubScene, ArmorShopScene, SettingsScene, DrawOnSkinScene, PetShopScene],
 };
 
 new Phaser.Game(config);

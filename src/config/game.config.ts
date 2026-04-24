@@ -53,6 +53,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
   heavy_shotgun:{ name: 'Heavy Shotgun',  damage: 4, range: 140, cooldown: 1000, rarity: 'epic',      color: 0xcc44ff, type: 'ranged' },
   sniper:       { name: 'Sniper',         damage: 5, range: 600, cooldown: 1500, rarity: 'epic',      color: 0xcc44ff, type: 'ranged' },
   minigun:      { name: 'Minigun',        damage: 1, range: 300, cooldown: 80,   rarity: 'epic',      color: 0xcc44ff, type: 'ranged' },
+  bb_gun:       { name: 'BB Gun',         damage: 1, range: 250, cooldown: 80,   rarity: 'common',    color: 0x222222, type: 'ranged' },
   rpg:          { name: 'RPG',            damage: 4, range: 300, cooldown: 2000, rarity: 'legendary', color: 0xffaa00, type: 'explosive' },
   grenade:      { name: 'Grenade',        damage: 3, range: 200, cooldown: 1200, rarity: 'uncommon',  color: 0x44cc44, type: 'explosive' },
   sword:        { name: 'Sword',          damage: 2, range: 100, cooldown: 400,  rarity: 'rare',      color: 0x4488ff, type: 'melee' },

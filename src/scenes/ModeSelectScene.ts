@@ -3,9 +3,14 @@ import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
 
 export class ModeSelectScene extends Phaser.Scene {
   private charData!: { characterKey: string; characterName: string };
-  private step: 'opponent' | 'order' = 'opponent';
   private selectedOpponent = 'bots';
   private stepObjects: Phaser.GameObjects.GameObject[] = [];
+  private gpPrev: Record<string, boolean> = {};
+  private focusIndex = 0;
+  private focusActions: (() => void)[] = [];
+  private focusHighlight?: Phaser.GameObjects.Graphics;
+  private focusRects: { x: number; y: number; w: number; h: number }[] = [];
+  private gpActive = false;
 
   constructor() {
     super({ key: 'ModeSelectScene' });
@@ -13,7 +18,6 @@ export class ModeSelectScene extends Phaser.Scene {
 
   init(data: { characterKey: string; characterName: string }): void {
     this.charData = data;
-    this.step = 'opponent';
     this.stepObjects = [];
   }
 
@@ -28,25 +32,8 @@ export class ModeSelectScene extends Phaser.Scene {
       fontSize: '14px', fontFamily: 'Arial Black, sans-serif',
       color: '#888888', stroke: '#000', strokeThickness: 2,
     }).setInteractive({ useHandCursor: true }).on('pointerdown', () => {
-      if (this.step === 'order') {
-        this.step = 'opponent';
-        this.showOpponentStep();
-      } else {
-        this.scene.start('CharacterSelectScene');
-      }
+      this.scene.start('CharacterSelectScene');
     });
-
-    this.showOpponentStep();
-    this.cameras.main.fadeIn(300, 0, 0, 0);
-  }
-
-  private clearStep(): void {
-    for (const obj of this.stepObjects) obj.destroy();
-    this.stepObjects = [];
-  }
-
-  private showOpponentStep(): void {
-    this.clearStep();
 
     const title = this.add.text(GAME_WIDTH / 2, 60, 'WHO DO YOU FIGHT?', {
       fontSize: '28px', fontFamily: 'Arial Black, sans-serif',
@@ -59,44 +46,60 @@ export class ModeSelectScene extends Phaser.Scene {
     const btnH = 80;
     const gap = 20;
 
+    const botsX = GAME_WIDTH / 2 - btnW / 2 - gap / 2;
+    const playersX = GAME_WIDTH / 2 + btnW / 2 + gap / 2;
     this.createModeButton(
-      GAME_WIDTH / 2 - btnW / 2 - gap / 2, btnY, btnW, btnH,
+      botsX, btnY, btnW, btnH,
       'BOTS', 'Fight against AI bots', 0x44aa44,
-      () => { this.selectedOpponent = 'bots'; this.step = 'order'; this.showOrderStep(); },
+      () => { this.selectedOpponent = 'bots'; this.startGame('players-first'); },
     );
+    this.focusRects.push({ x: botsX, y: btnY, w: btnW, h: btnH });
+    this.focusActions.push(() => { this.selectedOpponent = 'bots'; this.startGame('players-first'); });
 
     this.createModeButton(
-      GAME_WIDTH / 2 + btnW / 2 + gap / 2, btnY, btnW, btnH,
-      'PLAYERS', 'Fight against real players', 0x4488ff,
-      () => { this.selectedOpponent = 'players'; this.step = 'order'; this.showOrderStep(); },
+      playersX, btnY, btnW, btnH,
+      'PLAYERS', 'Fight real players online', 0x4488ff,
+      () => { this.selectedOpponent = 'players'; this.startGame('players-first'); },
     );
+    this.focusRects.push({ x: playersX, y: btnY, w: btnW, h: btnH });
+    this.focusActions.push(() => { this.selectedOpponent = 'players'; this.startGame('players-first'); });
+
+    this.focusHighlight = this.add.graphics().setDepth(50);
+    this.drawFocusHighlight();
+
+    this.cameras.main.fadeIn(300, 0, 0, 0);
   }
 
-  private showOrderStep(): void {
-    this.clearStep();
+  private drawFocusHighlight(): void {
+    if (!this.focusHighlight) return;
+    this.focusHighlight.clear();
+    if (!this.gpActive) return;
+    const r = this.focusRects[this.focusIndex];
+    if (!r) return;
+    this.focusHighlight.lineStyle(4, 0xffff00, 1);
+    this.focusHighlight.strokeRoundedRect(r.x - r.w / 2 - 4, r.y - r.h / 2 - 4, r.w + 8, r.h + 8, 14);
+  }
 
-    const title = this.add.text(GAME_WIDTH / 2, 60, 'WHAT ORDER?', {
-      fontSize: '28px', fontFamily: 'Arial Black, sans-serif',
-      color: '#ffffff', stroke: '#000', strokeThickness: 4,
-    }).setOrigin(0.5);
-    this.stepObjects.push(title);
-
-    const btnY = GAME_HEIGHT / 2 + 10;
-    const btnW = 180;
-    const btnH = 80;
-    const gap = 20;
-
-    this.createModeButton(
-      GAME_WIDTH / 2 - btnW / 2 - gap / 2, btnY, btnW, btnH,
-      'BOSS FIRST', 'Fight the bear first', 0xcc4444,
-      () => this.startGame('boss-first'),
-    );
-
-    this.createModeButton(
-      GAME_WIDTH / 2 + btnW / 2 + gap / 2, btnY, btnW, btnH,
-      'PLAYERS FIRST', 'Fight bots/players first', 0x44aa44,
-      () => this.startGame('players-first'),
-    );
+  update(): void {
+    const pads = navigator.getGamepads?.();
+    if (!pads) return;
+    for (const gp of pads) {
+      if (!gp) continue;
+      const left = !!gp.buttons[14]?.pressed || (gp.axes[0] || 0) < -0.5;
+      const right = !!gp.buttons[15]?.pressed || (gp.axes[0] || 0) > 0.5;
+      const confirm = !!gp.buttons[0]?.pressed || !!gp.buttons[9]?.pressed;
+      const edge = (key: string, cur: boolean) => {
+        const prev = !!this.gpPrev[key];
+        this.gpPrev[key] = cur;
+        return cur && !prev;
+      };
+      const anyInput = left || right || confirm;
+      if (anyInput && !this.gpActive) { this.gpActive = true; this.drawFocusHighlight(); }
+      if (edge('left', left) && this.focusIndex > 0) { this.focusIndex--; this.drawFocusHighlight(); }
+      if (edge('right', right) && this.focusIndex < this.focusActions.length - 1) { this.focusIndex++; this.drawFocusHighlight(); }
+      if (edge('confirm', confirm)) this.focusActions[this.focusIndex]?.();
+      break;
+    }
   }
 
   private createModeButton(cx: number, cy: number, w: number, h: number, label: string, desc: string, color: number, onClick: () => void): void {
@@ -133,11 +136,12 @@ export class ModeSelectScene extends Phaser.Scene {
     this.cameras.main.fadeOut(400, 0, 0, 0);
     this.time.delayedCall(400, () => {
       if (this.selectedOpponent === 'players') {
-        // Go to lobby for multiplayer matchmaking
+        // Real multiplayer, no room code — auto-match into the fullest open
+        // public room, or open a new one if none are advertising.
         this.scene.start('LobbyScene', {
           ...this.charData,
           mode,
-          action: 'create',
+          action: 'auto',
         });
       } else {
         this.scene.start('BattleScene', {

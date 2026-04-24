@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import * as THREE from 'three';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
 import { getCoins, spendCoins } from '../utils/coinStore';
 
@@ -55,9 +56,135 @@ export class ArmorShopScene extends Phaser.Scene {
   private scrollY = 0;
   private cardContainer!: Phaser.GameObjects.Container;
   private statusTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gpPrev: Record<string, boolean> = {};
+  private selectedIndex = 0;
+  private focusBorder!: Phaser.GameObjects.Graphics;
+  private gpActive = false;
+  private cardBounds: { cx: number; cy: number; w: number; h: number }[] = [];
 
   constructor() {
     super({ key: 'ArmorShopScene' });
+  }
+
+  /** Render a piece of armor as a 3D canvas icon matching the in-game model */
+  private render3DArmorIcon(item: ArmorItem): HTMLCanvasElement {
+    const S = 256;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(S, S);
+    renderer.setClearColor(0x000000, 0);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28, 1, 0.1, 50);
+    camera.position.set(1.5, 1.2, 2.5);
+    camera.lookAt(0, 0, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(3, 5, 4);
+    scene.add(sun);
+    scene.add(new THREE.DirectionalLight(0x8899cc, 0.5).translateX(-3).translateY(2));
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: item.color,
+      roughness: 0.15,
+      metalness: 0.9,
+      emissive: item.color,
+      emissiveIntensity: 0.2,
+    });
+
+    const root = new THREE.Group();
+    scene.add(root);
+
+    if (item.slot === 'head') {
+      const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.6, 16, 14), mat);
+      helmet.scale.set(1, 1.1, 1);
+      root.add(helmet);
+      const facePlate = new THREE.Mesh(
+        new THREE.BoxGeometry(0.5, 0.14, 0.14),
+        new THREE.MeshStandardMaterial({ color: 0x111122, metalness: 0.95, roughness: 0.05 }),
+      );
+      facePlate.position.set(0, -0.08, 0.52);
+      root.add(facePlate);
+      const crest = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.3, 0.65), mat);
+      crest.position.set(0, 0.4, -0.05);
+      root.add(crest);
+    } else if (item.slot === 'chest' || item.slot === 'full') {
+      const front = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.1, 0.25), mat);
+      front.position.set(0, 0.1, 0.15);
+      root.add(front);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.05, 0.2), mat);
+      back.position.set(0, 0.1, -0.15);
+      root.add(back);
+      for (const side of [-1, 1]) {
+        const sp = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.0, 0.6), mat);
+        sp.position.set(side * 0.6, 0.1, 0);
+        root.add(sp);
+        const pad = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 10), mat);
+        pad.scale.set(1.3, 0.7, 1.3);
+        pad.position.set(side * 0.7, 0.55, 0);
+        root.add(pad);
+      }
+      const collar = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.18, 0.72), mat);
+      collar.position.set(0, 0.72, 0);
+      root.add(collar);
+      if (item.slot === 'full') {
+        // Add leg plates hint for full suit
+        for (const side of [-1, 1]) {
+          const thighPlate = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 0.42), mat);
+          thighPlate.position.set(side * 0.25, -0.75, 0);
+          root.add(thighPlate);
+        }
+      }
+    } else if (item.slot === 'shield') {
+      // Curved shield
+      const shield = new THREE.Mesh(
+        new THREE.SphereGeometry(0.85, 16, 12, 0, Math.PI, 0, Math.PI * 0.7),
+        mat,
+      );
+      shield.rotation.y = Math.PI / 2;
+      shield.rotation.z = -0.1;
+      root.add(shield);
+      const emblem = new THREE.Mesh(
+        new THREE.CircleGeometry(0.22, 16),
+        new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.9, roughness: 0.1 }),
+      );
+      emblem.position.set(0.22, 0, 0);
+      emblem.rotation.y = -Math.PI / 2;
+      root.add(emblem);
+    } else if (item.slot === 'legs') {
+      for (const sx of [-0.4, 0.4]) {
+        const thighPlate = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.5), mat);
+        thighPlate.position.set(sx, 0.35, 0);
+        root.add(thighPlate);
+        const knee = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), mat);
+        knee.position.set(sx, -0.05, 0.15);
+        root.add(knee);
+        const shinPlate = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.65, 0.46), mat);
+        shinPlate.position.set(sx, -0.45, 0);
+        root.add(shinPlate);
+      }
+    } else {
+      // feet
+      for (const sx of [-0.35, 0.35]) {
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.32, 0.75), mat);
+        boot.position.set(sx, 0.0, 0.1);
+        root.add(boot);
+        const ankle = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.22, 0.46), mat);
+        ankle.position.set(sx, 0.25, 0);
+        root.add(ankle);
+      }
+    }
+
+    // Slight rotation so the 3D-ness reads at a glance
+    root.rotation.y = -0.4;
+
+    renderer.render(scene, camera);
+    const canvas = document.createElement('canvas');
+    canvas.width = S;
+    canvas.height = S;
+    canvas.getContext('2d')!.drawImage(renderer.domElement, 0, 0);
+    renderer.dispose();
+    return canvas;
   }
 
   create(): void {
@@ -101,7 +228,11 @@ export class ArmorShopScene extends Phaser.Scene {
     this.cardContainer = this.add.container(0, topY);
     this.cardContainer.setMask(mask);
 
+    this.focusBorder = this.add.graphics().setDepth(50);
+    this.cardContainer.add(this.focusBorder);
+
     this.buildCards();
+    this.updateFocusBorder();
 
     // Scroll with mouse wheel
     this.input.on('wheel', (_pointer: Phaser.Input.Pointer, _gx: number[], _gy: number[], _gz: number[], deltaY: number) => {
@@ -131,6 +262,137 @@ export class ArmorShopScene extends Phaser.Scene {
     this.cameras.main.fadeIn(200, 0, 0, 0);
   }
 
+  update(): void {
+    const pads = navigator.getGamepads?.();
+    if (!pads) return;
+    for (const gp of pads) {
+      if (!gp) continue;
+      const edge = (k: string, cur: boolean) => {
+        const prev = !!this.gpPrev[k];
+        this.gpPrev[k] = cur;
+        return cur && !prev;
+      };
+      const ax = gp.axes[0] || 0;
+      const ay = gp.axes[1] || 0;
+      const up = !!gp.buttons[12]?.pressed || ay < -0.5;
+      const down = !!gp.buttons[13]?.pressed || ay > 0.5;
+      const left = !!gp.buttons[14]?.pressed || ax < -0.5;
+      const right = !!gp.buttons[15]?.pressed || ax > 0.5;
+      const cols = 4;
+      const max = ARMOR_ITEMS.length - 1;
+
+      const anyInput = up || down || left || right || !!gp.buttons[0]?.pressed || !!gp.buttons[1]?.pressed || !!gp.buttons[3]?.pressed;
+      if (anyInput && !this.gpActive) { this.gpActive = true; this.updateFocusBorder(); }
+
+      if (edge('left', left) && this.selectedIndex > 0) {
+        this.selectedIndex--; this.updateFocusBorder(); this.scrollToSelected();
+      }
+      if (edge('right', right) && this.selectedIndex < max) {
+        this.selectedIndex++; this.updateFocusBorder(); this.scrollToSelected();
+      }
+      if (edge('up', up) && this.selectedIndex - cols >= 0) {
+        this.selectedIndex -= cols; this.updateFocusBorder(); this.scrollToSelected();
+      }
+      if (edge('down', down) && this.selectedIndex + cols <= max) {
+        this.selectedIndex += cols; this.updateFocusBorder(); this.scrollToSelected();
+      }
+
+      // A → buy if not owned, else toggle equip
+      if (edge('confirm', !!gp.buttons[0]?.pressed)) {
+        this.activateSelected();
+      }
+      // Y → toggle equip explicitly (when owned)
+      if (edge('equip', !!gp.buttons[3]?.pressed)) {
+        const item = ARMOR_ITEMS[this.selectedIndex];
+        if (getPurchasedArmor().includes(item.id)) this.toggleEquipById(item);
+      }
+      // B → back
+      if (edge('back', !!gp.buttons[1]?.pressed)) {
+        this.cameras.main.fadeOut(200, 0, 0, 0);
+        this.time.delayedCall(200, () => this.scene.start('ShopHubScene'));
+      }
+      break;
+    }
+  }
+
+  private activateSelected(): void {
+    const item = ARMOR_ITEMS[this.selectedIndex];
+    if (getPurchasedArmor().includes(item.id)) {
+      this.toggleEquipById(item);
+    } else {
+      if (!spendCoins(item.price)) {
+        const warn = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 20, 'Not enough coins!', {
+          fontSize: '12px', fontFamily: 'Arial Black', color: '#ff4444',
+          stroke: '#000', strokeThickness: 2,
+        }).setOrigin(0.5).setDepth(1000);
+        this.time.delayedCall(1500, () => warn.destroy());
+        return;
+      }
+      const purchased = getPurchasedArmor();
+      purchased.push(item.id);
+      savePurchasedArmor(purchased);
+      this.coinText.setText(`${getCoins()} coins`);
+      this.cardContainer.removeAll(true);
+      this.statusTexts.clear();
+      this.focusBorder = this.add.graphics().setDepth(50);
+      this.cardContainer.add(this.focusBorder);
+      this.buildCards();
+      this.updateFocusBorder();
+    }
+  }
+
+  private toggleEquipById(item: ArmorItem): void {
+    let equipped = getEquippedArmor();
+    const isEquipped = equipped.includes(item.id);
+    if (isEquipped) {
+      equipped = equipped.filter(id => id !== item.id);
+    } else {
+      if (item.slot === 'full') {
+        equipped = [];
+      } else {
+        equipped = equipped.filter(id => {
+          const existing = ARMOR_ITEMS.find(a => a.id === id);
+          return existing && existing.slot !== 'full' && existing.slot !== item.slot;
+        });
+      }
+      equipped.push(item.id);
+    }
+    saveEquippedArmor(equipped);
+    this.cardContainer.removeAll(true);
+    this.statusTexts.clear();
+    this.focusBorder = this.add.graphics().setDepth(50);
+    this.cardContainer.add(this.focusBorder);
+    this.buildCards();
+    this.updateFocusBorder();
+  }
+
+  private updateFocusBorder(): void {
+    if (!this.focusBorder) return;
+    this.focusBorder.clear();
+    if (!this.gpActive) return;
+    const b = this.cardBounds[this.selectedIndex];
+    if (!b) return;
+    this.focusBorder.lineStyle(3, 0xffff55, 1);
+    this.focusBorder.strokeRoundedRect(b.cx - b.w / 2 - 2, b.cy - b.h / 2 - 2, b.w + 4, b.h + 4, 7);
+  }
+
+  private scrollToSelected(): void {
+    const b = this.cardBounds[this.selectedIndex];
+    if (!b) return;
+    const topY = 44;
+    const areaH = GAME_HEIGHT - topY - 4;
+    const cardAbsY = b.cy + this.scrollY; // y in card container + current scroll offset
+    const minVisible = 8;
+    const maxVisible = areaH - 8;
+    if (cardAbsY - b.h / 2 < minVisible) {
+      this.scrollY += minVisible - (cardAbsY - b.h / 2);
+    } else if (cardAbsY + b.h / 2 > maxVisible) {
+      this.scrollY -= (cardAbsY + b.h / 2) - maxVisible;
+    }
+    this.clampScroll();
+    this.cardContainer.y = 44 + this.scrollY;
+  }
+
   private scrollCards(delta: number): void {
     this.scrollY += delta;
     this.clampScroll();
@@ -148,6 +410,7 @@ export class ArmorShopScene extends Phaser.Scene {
   }
 
   private buildCards(): void {
+    this.cardBounds = [];
     const purchased = getPurchasedArmor();
     const equipped = getEquippedArmor();
     const cols = 4;
@@ -172,549 +435,11 @@ export class ArmorShopScene extends Phaser.Scene {
       bg.strokeRoundedRect(cx - cardW / 2, cy - cardH / 2, cardW, cardH, 6);
       this.cardContainer.add(bg);
 
-      // Armor icon — ultra high quality canvas preview
+      // Armor icon — 3D rendered (matches in-game player armor)
       const iconX = cx - cardW / 2 + 22;
       const iconY = cy - 8;
-      const S = 256; // ultra hi-res canvas
-      const canvas = document.createElement('canvas');
-      canvas.width = S;
-      canvas.height = S;
-      const c = canvas.getContext('2d')!;
-      c.imageSmoothingEnabled = true;
-      c.imageSmoothingQuality = 'high';
-      const r = item.color >> 16 & 0xff, g = item.color >> 8 & 0xff, b = item.color & 0xff;
-      const base = `rgb(${r},${g},${b})`;
-      const dark = `rgb(${Math.max(0,r-50)},${Math.max(0,g-50)},${Math.max(0,b-50)})`;
-      const darker = `rgb(${Math.max(0,r-80)},${Math.max(0,g-80)},${Math.max(0,b-80)})`;
-      const darkest = `rgb(${Math.max(0,r-110)},${Math.max(0,g-110)},${Math.max(0,b-110)})`;
-      const light = `rgb(${Math.min(255,r+60)},${Math.min(255,g+60)},${Math.min(255,b+60)})`;
-      const bright = `rgb(${Math.min(255,r+100)},${Math.min(255,g+100)},${Math.min(255,b+100)})`;
-      const glow = `rgba(${Math.min(255,r+80)},${Math.min(255,g+80)},${Math.min(255,b+80)},0.4)`;
-      // Background glow
-      const bgGlow = c.createRadialGradient(128, 128, 20, 128, 128, 120);
-      bgGlow.addColorStop(0, glow);
-      bgGlow.addColorStop(1, 'rgba(0,0,0,0)');
-      c.fillStyle = bgGlow;
-      c.fillRect(0, 0, S, S);
+      const canvas = this.render3DArmorIcon(item);
 
-      if (item.slot === 'head') {
-        // Spartan-style helmet — ultra detail
-        const grad = c.createRadialGradient(100, 80, 10, 128, 128, 110);
-        grad.addColorStop(0, bright);
-        grad.addColorStop(0.4, base);
-        grad.addColorStop(1, darker);
-        // Main dome
-        c.fillStyle = grad;
-        c.beginPath();
-        c.ellipse(128, 100, 76, 84, 0, Math.PI, 0);
-        c.lineTo(204, 160);
-        c.quadraticCurveTo(204, 192, 180, 200);
-        c.lineTo(76, 200);
-        c.quadraticCurveTo(52, 192, 52, 160);
-        c.fill();
-        // Engraved lines on dome
-        c.strokeStyle = dark;
-        c.lineWidth = 1.5;
-        for (let a = -0.6; a <= 0.6; a += 0.3) {
-          c.beginPath();
-          c.ellipse(128, 100, 70, 78, a * 0.15, Math.PI + 0.3, -0.3);
-          c.stroke();
-        }
-        // Face opening — deep shadow
-        const faceGrad = c.createRadialGradient(128, 144, 5, 128, 144, 38);
-        faceGrad.addColorStop(0, '#000000');
-        faceGrad.addColorStop(1, '#0a0a0a');
-        c.fillStyle = faceGrad;
-        c.beginPath();
-        c.ellipse(128, 144, 36, 44, 0, 0, Math.PI * 2);
-        c.fill();
-        // T-shaped visor
-        c.fillStyle = '#111';
-        c.fillRect(92, 116, 72, 10);
-        c.fillRect(116, 110, 24, 64);
-        // Inner visor glow
-        c.fillStyle = 'rgba(100,160,255,0.08)';
-        c.fillRect(94, 118, 68, 6);
-        // Nose guard with bevel
-        const noseGrad = c.createLinearGradient(120, 108, 136, 108);
-        noseGrad.addColorStop(0, darker);
-        noseGrad.addColorStop(0.5, dark);
-        noseGrad.addColorStop(1, darker);
-        c.fillStyle = noseGrad;
-        c.fillRect(120, 108, 16, 68);
-        // Crest/mohawk — layered
-        const crestGrad = c.createLinearGradient(128, 16, 128, 100);
-        crestGrad.addColorStop(0, bright);
-        crestGrad.addColorStop(0.5, light);
-        crestGrad.addColorStop(1, dark);
-        c.fillStyle = crestGrad;
-        c.beginPath();
-        c.moveTo(116, 100);
-        c.quadraticCurveTo(112, 36, 128, 12);
-        c.quadraticCurveTo(144, 36, 140, 100);
-        c.fill();
-        // Crest ridges
-        c.strokeStyle = darker;
-        c.lineWidth = 1;
-        for (let y = 24; y < 96; y += 8) {
-          c.beginPath();
-          const w = 8 + (y - 24) * 0.12;
-          c.moveTo(128 - w, y);
-          c.lineTo(128 + w, y);
-          c.stroke();
-        }
-        // Cheek guards
-        c.fillStyle = dark;
-        c.beginPath();
-        c.moveTo(56, 150);
-        c.quadraticCurveTo(48, 170, 62, 192);
-        c.lineTo(82, 186);
-        c.quadraticCurveTo(72, 160, 68, 150);
-        c.fill();
-        c.beginPath();
-        c.moveTo(200, 150);
-        c.quadraticCurveTo(208, 170, 194, 192);
-        c.lineTo(174, 186);
-        c.quadraticCurveTo(184, 160, 188, 150);
-        c.fill();
-        // Shine highlights
-        c.fillStyle = 'rgba(255,255,255,0.18)';
-        c.beginPath();
-        c.ellipse(96, 76, 24, 36, -0.3, 0, Math.PI * 2);
-        c.fill();
-        c.fillStyle = 'rgba(255,255,255,0.08)';
-        c.beginPath();
-        c.ellipse(160, 90, 16, 24, 0.2, 0, Math.PI * 2);
-        c.fill();
-        // Edge trim
-        c.strokeStyle = darkest;
-        c.lineWidth = 4;
-        c.beginPath();
-        c.moveTo(52, 160);
-        c.quadraticCurveTo(52, 192, 76, 200);
-        c.lineTo(180, 200);
-        c.quadraticCurveTo(204, 192, 204, 160);
-        c.stroke();
-        // Rivets along bottom
-        for (const rx of [68, 92, 128, 164, 188]) {
-          c.fillStyle = darkest;
-          c.beginPath();
-          c.arc(rx, 198, 4, 0, Math.PI * 2);
-          c.fill();
-          c.fillStyle = light;
-          c.beginPath();
-          c.arc(rx - 1, 196, 1.5, 0, Math.PI * 2);
-          c.fill();
-        }
-      } else if (item.slot === 'chest' || item.slot === 'full') {
-        // Muscled chestplate — ultra detail
-        const grad = c.createLinearGradient(60, 0, 200, 256);
-        grad.addColorStop(0, light);
-        grad.addColorStop(0.3, base);
-        grad.addColorStop(0.7, dark);
-        grad.addColorStop(1, darker);
-        c.fillStyle = grad;
-        c.beginPath();
-        c.moveTo(48, 28);
-        c.lineTo(84, 8);
-        c.lineTo(172, 8);
-        c.lineTo(208, 28);
-        c.lineTo(216, 60);
-        c.lineTo(208, 180);
-        c.quadraticCurveTo(200, 220, 160, 232);
-        c.lineTo(96, 232);
-        c.quadraticCurveTo(56, 220, 48, 180);
-        c.lineTo(40, 60);
-        c.fill();
-        // Pec muscles with shading
-        const pecGrad = c.createRadialGradient(96, 72, 4, 96, 80, 32);
-        pecGrad.addColorStop(0, base);
-        pecGrad.addColorStop(1, dark);
-        c.fillStyle = pecGrad;
-        c.beginPath();
-        c.ellipse(96, 80, 36, 28, 0, 0, Math.PI * 2);
-        c.fill();
-        const pecGrad2 = c.createRadialGradient(160, 72, 4, 160, 80, 32);
-        pecGrad2.addColorStop(0, base);
-        pecGrad2.addColorStop(1, dark);
-        c.fillStyle = pecGrad2;
-        c.beginPath();
-        c.ellipse(160, 80, 36, 28, 0, 0, Math.PI * 2);
-        c.fill();
-        // Ab muscles — 6 pack
-        c.strokeStyle = darker;
-        c.lineWidth = 2.5;
-        c.beginPath();
-        c.moveTo(128, 112);
-        c.lineTo(128, 216);
-        c.stroke();
-        for (const y of [128, 152, 176, 200]) {
-          c.beginPath();
-          c.moveTo(88, y);
-          c.quadraticCurveTo(128, y + 6, 168, y);
-          c.stroke();
-        }
-        // Individual ab shading
-        for (const [ax, ay] of [[108,140],[148,140],[108,164],[148,164],[108,188],[148,188]]) {
-          const abG = c.createRadialGradient(ax, ay, 2, ax, ay, 16);
-          abG.addColorStop(0, 'rgba(255,255,255,0.06)');
-          abG.addColorStop(1, 'rgba(0,0,0,0.04)');
-          c.fillStyle = abG;
-          c.beginPath();
-          c.ellipse(ax, ay, 16, 10, 0, 0, Math.PI * 2);
-          c.fill();
-        }
-        // Shoulder pauldrons
-        for (const [sx, flip] of [[48, 1], [208, -1]] as [number, number][]) {
-          const pGrad = c.createLinearGradient(sx, 12, sx + flip * 30, 50);
-          pGrad.addColorStop(0, light);
-          pGrad.addColorStop(1, darker);
-          c.fillStyle = pGrad;
-          c.beginPath();
-          c.moveTo(sx, 28);
-          c.lineTo(sx - flip * 16, 8);
-          c.quadraticCurveTo(sx - flip * 24, 12, sx - flip * 20, 48);
-          c.lineTo(sx, 42);
-          c.fill();
-          // Pauldron ridges
-          c.strokeStyle = darkest;
-          c.lineWidth = 1.5;
-          for (let py = 18; py < 42; py += 8) {
-            c.beginPath();
-            c.moveTo(sx, py);
-            c.lineTo(sx - flip * 16, py - 4);
-            c.stroke();
-          }
-        }
-        // Center gem with sparkle
-        const gemGrad = c.createRadialGradient(126, 52, 2, 128, 56, 12);
-        gemGrad.addColorStop(0, '#ffffff');
-        gemGrad.addColorStop(0.3, bright);
-        gemGrad.addColorStop(1, darker);
-        c.fillStyle = gemGrad;
-        c.beginPath();
-        c.arc(128, 56, 12, 0, Math.PI * 2);
-        c.fill();
-        // Gem sparkle lines
-        c.strokeStyle = 'rgba(255,255,255,0.6)';
-        c.lineWidth = 1;
-        for (let a = 0; a < Math.PI * 2; a += Math.PI / 4) {
-          c.beginPath();
-          c.moveTo(128 + Math.cos(a) * 8, 56 + Math.sin(a) * 8);
-          c.lineTo(128 + Math.cos(a) * 16, 56 + Math.sin(a) * 16);
-          c.stroke();
-        }
-        // Shine
-        c.fillStyle = 'rgba(255,255,255,0.12)';
-        c.beginPath();
-        c.ellipse(88, 64, 28, 40, -0.2, 0, Math.PI * 2);
-        c.fill();
-        // Edge outline
-        c.strokeStyle = darkest;
-        c.lineWidth = 4;
-        c.beginPath();
-        c.moveTo(48, 28);
-        c.lineTo(40, 60);
-        c.lineTo(48, 180);
-        c.quadraticCurveTo(56, 220, 96, 232);
-        c.lineTo(160, 232);
-        c.quadraticCurveTo(200, 220, 208, 180);
-        c.lineTo(216, 60);
-        c.lineTo(208, 28);
-        c.stroke();
-        // Rivets along neckline
-        for (const rx of [72, 96, 128, 160, 184]) {
-          c.fillStyle = darkest;
-          c.beginPath();
-          c.arc(rx, 16, 4, 0, Math.PI * 2);
-          c.fill();
-          c.fillStyle = light;
-          c.beginPath();
-          c.arc(rx - 1, 14, 1.5, 0, Math.PI * 2);
-          c.fill();
-        }
-        if (item.slot === 'full') {
-          // Waist belt
-          c.fillStyle = darker;
-          c.fillRect(56, 208, 144, 14);
-          // Gold buckle
-          const buckGrad = c.createLinearGradient(116, 208, 140, 222);
-          buckGrad.addColorStop(0, '#ffe066');
-          buckGrad.addColorStop(0.5, '#ffd700');
-          buckGrad.addColorStop(1, '#b8860b');
-          c.fillStyle = buckGrad;
-          c.fillRect(116, 208, 24, 14);
-          // Leg plates peek
-          c.fillStyle = dark;
-          c.fillRect(72, 222, 20, 16);
-          c.fillRect(164, 222, 20, 16);
-        }
-      } else if (item.slot === 'shield') {
-        // Kite shield — ultra detail
-        const grad = c.createRadialGradient(108, 96, 20, 128, 128, 112);
-        grad.addColorStop(0, bright);
-        grad.addColorStop(0.5, base);
-        grad.addColorStop(1, darker);
-        c.fillStyle = grad;
-        c.beginPath();
-        c.moveTo(128, 8);
-        c.lineTo(224, 40);
-        c.lineTo(216, 144);
-        c.quadraticCurveTo(200, 216, 128, 244);
-        c.quadraticCurveTo(56, 216, 40, 144);
-        c.lineTo(32, 40);
-        c.fill();
-        // Outer border — thick
-        c.strokeStyle = darkest;
-        c.lineWidth = 8;
-        c.beginPath();
-        c.moveTo(128, 8);
-        c.lineTo(224, 40);
-        c.lineTo(216, 144);
-        c.quadraticCurveTo(200, 216, 128, 244);
-        c.quadraticCurveTo(56, 216, 40, 144);
-        c.lineTo(32, 40);
-        c.closePath();
-        c.stroke();
-        // Inner border — ornate
-        c.strokeStyle = light;
-        c.lineWidth = 3;
-        c.beginPath();
-        c.moveTo(128, 24);
-        c.lineTo(208, 48);
-        c.lineTo(200, 140);
-        c.quadraticCurveTo(188, 200, 128, 228);
-        c.quadraticCurveTo(68, 200, 56, 140);
-        c.lineTo(48, 48);
-        c.closePath();
-        c.stroke();
-        // Dragon/lion emblem instead of plain cross
-        c.fillStyle = light;
-        // Shield boss (center circle)
-        const bossGrad = c.createRadialGradient(126, 120, 4, 128, 124, 28);
-        bossGrad.addColorStop(0, '#ffffff');
-        bossGrad.addColorStop(0.3, bright);
-        bossGrad.addColorStop(1, dark);
-        c.fillStyle = bossGrad;
-        c.beginPath();
-        c.arc(128, 124, 28, 0, Math.PI * 2);
-        c.fill();
-        c.strokeStyle = darkest;
-        c.lineWidth = 3;
-        c.beginPath();
-        c.arc(128, 124, 28, 0, Math.PI * 2);
-        c.stroke();
-        // Cross arms radiating from boss
-        c.fillStyle = dark;
-        c.fillRect(120, 40, 16, 76);
-        c.fillRect(120, 156, 16, 60);
-        c.fillRect(64, 116, 56, 16);
-        c.fillRect(136, 116, 56, 16);
-        // Cross bevel
-        c.fillStyle = 'rgba(255,255,255,0.08)';
-        c.fillRect(122, 42, 6, 74);
-        c.fillRect(66, 118, 54, 6);
-        // Corner decorations
-        for (const [cx2, cy2] of [[80, 60], [176, 60], [72, 180], [184, 180]]) {
-          c.fillStyle = darkest;
-          c.beginPath();
-          c.arc(cx2, cy2, 8, 0, Math.PI * 2);
-          c.fill();
-          c.fillStyle = light;
-          c.beginPath();
-          c.arc(cx2 - 2, cy2 - 2, 3, 0, Math.PI * 2);
-          c.fill();
-        }
-        // Shine
-        c.fillStyle = 'rgba(255,255,255,0.14)';
-        c.beginPath();
-        c.ellipse(96, 76, 32, 48, -0.2, 0, Math.PI * 2);
-        c.fill();
-        // Rivets around border
-        const shieldPath = [[128,16],[56,44],[48,80],[44,120],[52,160],[72,196],[128,236],[184,196],[204,160],[212,120],[208,80],[200,44]];
-        for (const [rx, ry] of shieldPath) {
-          c.fillStyle = darkest;
-          c.beginPath();
-          c.arc(rx, ry, 5, 0, Math.PI * 2);
-          c.fill();
-          c.fillStyle = light;
-          c.beginPath();
-          c.arc(rx - 1.5, ry - 1.5, 2, 0, Math.PI * 2);
-          c.fill();
-        }
-      } else if (item.slot === 'legs') {
-        // Greaves — ultra detail
-        for (const [lx, side] of [[36, -1], [144, 1]] as [number, number][]) {
-          const legGrad = c.createLinearGradient(lx, 8, lx + 76, 240);
-          legGrad.addColorStop(0, light);
-          legGrad.addColorStop(0.4, base);
-          legGrad.addColorStop(1, darker);
-          c.fillStyle = legGrad;
-          // Leg shape — tapered
-          c.beginPath();
-          c.moveTo(lx, 16);
-          c.lineTo(lx + 76, 16);
-          c.quadraticCurveTo(lx + 80, 120, lx + 72, 224);
-          c.quadraticCurveTo(lx + 68, 240, lx + 52, 240);
-          c.lineTo(lx + 24, 240);
-          c.quadraticCurveTo(lx + 8, 240, lx + 4, 224);
-          c.quadraticCurveTo(lx - 4, 120, lx, 16);
-          c.fill();
-          // Knee plate — layered
-          const kneeGrad = c.createRadialGradient(lx + 38, 108, 4, lx + 38, 112, 28);
-          kneeGrad.addColorStop(0, bright);
-          kneeGrad.addColorStop(0.5, dark);
-          kneeGrad.addColorStop(1, darkest);
-          c.fillStyle = kneeGrad;
-          c.beginPath();
-          c.ellipse(lx + 38, 112, 32, 24, 0, 0, Math.PI * 2);
-          c.fill();
-          // Knee rivet
-          c.fillStyle = bright;
-          c.beginPath();
-          c.arc(lx + 38, 112, 6, 0, Math.PI * 2);
-          c.fill();
-          c.fillStyle = 'rgba(255,255,255,0.5)';
-          c.beginPath();
-          c.arc(lx + 36, 110, 2.5, 0, Math.PI * 2);
-          c.fill();
-          // Shin ridges — curved
-          c.strokeStyle = darker;
-          c.lineWidth = 2.5;
-          for (const y of [144, 164, 184, 204]) {
-            c.beginPath();
-            c.moveTo(lx + 10, y);
-            c.quadraticCurveTo(lx + 38, y + 4, lx + 66, y);
-            c.stroke();
-          }
-          // Thigh plate decoration
-          c.strokeStyle = dark;
-          c.lineWidth = 2;
-          c.beginPath();
-          c.moveTo(lx + 20, 28);
-          c.quadraticCurveTo(lx + 38, 36, lx + 56, 28);
-          c.stroke();
-          c.beginPath();
-          c.moveTo(lx + 22, 48);
-          c.quadraticCurveTo(lx + 38, 56, lx + 54, 48);
-          c.stroke();
-          // Shine
-          c.fillStyle = 'rgba(255,255,255,0.12)';
-          c.beginPath();
-          c.ellipse(lx + 24, 56, 12, 32, -0.1, 0, Math.PI * 2);
-          c.fill();
-          // Outline
-          c.strokeStyle = darkest;
-          c.lineWidth = 4;
-          c.beginPath();
-          c.moveTo(lx, 16);
-          c.lineTo(lx + 76, 16);
-          c.quadraticCurveTo(lx + 80, 120, lx + 72, 224);
-          c.quadraticCurveTo(lx + 68, 240, lx + 52, 240);
-          c.lineTo(lx + 24, 240);
-          c.quadraticCurveTo(lx + 8, 240, lx + 4, 224);
-          c.quadraticCurveTo(lx - 4, 120, lx, 16);
-          c.closePath();
-          c.stroke();
-        }
-      } else {
-        // Armored boots — ultra detail
-        for (const [bx] of [[8], [132]] as [number][]) {
-          const bootGrad = c.createLinearGradient(bx, 20, bx + 112, 220);
-          bootGrad.addColorStop(0, light);
-          bootGrad.addColorStop(0.4, base);
-          bootGrad.addColorStop(1, darker);
-          c.fillStyle = bootGrad;
-          // Boot shape
-          c.beginPath();
-          c.moveTo(bx + 16, 24);
-          c.lineTo(bx + 88, 24);
-          c.quadraticCurveTo(bx + 96, 80, bx + 92, 160);
-          c.lineTo(bx + 104, 184);
-          c.lineTo(bx + 104, 216);
-          c.lineTo(bx + 4, 216);
-          c.lineTo(bx + 4, 184);
-          c.lineTo(bx + 12, 160);
-          c.quadraticCurveTo(bx + 8, 80, bx + 16, 24);
-          c.fill();
-          // Sole
-          c.fillStyle = '#111';
-          c.fillRect(bx, 212, 108, 20);
-          // Toe cap
-          const toeGrad = c.createRadialGradient(bx + 54, 184, 8, bx + 54, 188, 32);
-          toeGrad.addColorStop(0, base);
-          toeGrad.addColorStop(1, darkest);
-          c.fillStyle = toeGrad;
-          c.beginPath();
-          c.ellipse(bx + 54, 190, 44, 20, 0, 0, Math.PI);
-          c.fill();
-          // Ankle strap
-          c.fillStyle = darker;
-          c.fillRect(bx + 12, 96, 80, 14);
-          // Gold buckle
-          const buckGrad = c.createLinearGradient(bx + 42, 96, bx + 62, 110);
-          buckGrad.addColorStop(0, '#ffe066');
-          buckGrad.addColorStop(0.5, '#ffd700');
-          buckGrad.addColorStop(1, '#b8860b');
-          c.fillStyle = buckGrad;
-          c.fillRect(bx + 42, 96, 20, 14);
-          // Upper strap
-          c.fillStyle = dark;
-          c.fillRect(bx + 16, 48, 72, 10);
-          // Shin plate
-          c.fillStyle = dark;
-          c.beginPath();
-          c.moveTo(bx + 30, 52);
-          c.lineTo(bx + 74, 52);
-          c.lineTo(bx + 70, 92);
-          c.lineTo(bx + 34, 92);
-          c.fill();
-          // Shin plate highlight
-          c.fillStyle = 'rgba(255,255,255,0.08)';
-          c.fillRect(bx + 34, 56, 16, 30);
-          // Lace holes
-          for (let ly = 120; ly < 170; ly += 16) {
-            c.fillStyle = darkest;
-            c.beginPath();
-            c.arc(bx + 44, ly, 3, 0, Math.PI * 2);
-            c.fill();
-            c.beginPath();
-            c.arc(bx + 60, ly, 3, 0, Math.PI * 2);
-            c.fill();
-            // Lace
-            c.strokeStyle = darker;
-            c.lineWidth = 1.5;
-            c.beginPath();
-            c.moveTo(bx + 44, ly);
-            c.lineTo(bx + 60, ly + 8);
-            c.stroke();
-            c.beginPath();
-            c.moveTo(bx + 60, ly);
-            c.lineTo(bx + 44, ly + 8);
-            c.stroke();
-          }
-          // Shine
-          c.fillStyle = 'rgba(255,255,255,0.1)';
-          c.beginPath();
-          c.ellipse(bx + 36, 56, 12, 28, -0.1, 0, Math.PI * 2);
-          c.fill();
-          // Outline
-          c.strokeStyle = darkest;
-          c.lineWidth = 4;
-          c.beginPath();
-          c.moveTo(bx + 16, 24);
-          c.lineTo(bx + 88, 24);
-          c.quadraticCurveTo(bx + 96, 80, bx + 92, 160);
-          c.lineTo(bx + 104, 184);
-          c.lineTo(bx + 104, 216);
-          c.lineTo(bx + 4, 216);
-          c.lineTo(bx + 4, 184);
-          c.lineTo(bx + 12, 160);
-          c.quadraticCurveTo(bx + 8, 80, bx + 16, 24);
-          c.closePath();
-          c.stroke();
-        }
-      }
 
       const texKey = 'armor-icon-' + item.id;
       if (this.textures.exists(texKey)) this.textures.remove(texKey);
@@ -729,15 +454,24 @@ export class ArmorShopScene extends Phaser.Scene {
         stroke: '#000', strokeThickness: 1,
       }));
 
-      // Protection & price
-      this.cardContainer.add(this.add.text(textX, cy - cardH / 2 + 22, `+${item.protection} HP  |  ${item.price} coins`, {
+      // Protection
+      this.cardContainer.add(this.add.text(textX, cy - cardH / 2 + 22, `+${item.protection} HP`, {
         fontSize: '9px', fontFamily: 'Arial', color: '#aaddff',
       }));
 
+      // Price — prominent gold text with coin marker
+      this.cardContainer.add(this.add.text(textX, cy - cardH / 2 + 34, `\u2605 ${item.price} coins`, {
+        fontSize: '11px', fontFamily: 'Arial Black', color: '#ffdd00',
+        stroke: '#000', strokeThickness: 2,
+      }));
+
       // Description
-      this.cardContainer.add(this.add.text(textX, cy - cardH / 2 + 34, item.description, {
+      this.cardContainer.add(this.add.text(textX, cy - cardH / 2 + 48, item.description, {
         fontSize: '8px', fontFamily: 'Arial', color: '#888888',
       }));
+
+      // Track card bounds for gamepad focus
+      this.cardBounds.push({ cx, cy, w: cardW, h: cardH });
 
       // Status text
       const statusTxt = this.add.text(cx + cardW / 2 - 8, cy - cardH / 2 + 8, '', {
