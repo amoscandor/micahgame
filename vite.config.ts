@@ -20,8 +20,19 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,png,jpg,svg}'],
-        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        globPatterns: ['**/*.{js,css,html,png,jpg,jpeg,svg,ico,woff,woff2,ttf,mp3,wav,ogg,json}'],
+        maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
+        navigateFallback: '/fon9/index.html',
+        runtimeCaching: [
+          {
+            urlPattern: /.*/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'fighting-wars-all',
+              expiration: { maxEntries: 500 },
+            },
+          },
+        ],
       },
     }),
   ],
