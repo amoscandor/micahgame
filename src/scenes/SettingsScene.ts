@@ -1,11 +1,7 @@
 import Phaser from 'phaser';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
-import { getControls, saveControls, resetControls, ACTION_LABELS, DEFAULT_KEYBOARD, DEFAULT_GAMEPAD, keyCodeToLabel, gamepadButtonLabel, type ControlScheme, type Binding } from '../utils/controlBindings';
 
 export class SettingsScene extends Phaser.Scene {
-  private listeningFor: { action: keyof ControlScheme; device: 'keyboard' | 'gamepad'; text: Phaser.GameObjects.Text } | null = null;
-  private controlTexts: Map<string, Phaser.GameObjects.Text> = new Map();
-  private pollTimer: Phaser.Time.TimerEvent | null = null;
   private scrollY = 0;
   private maxScroll = 0;
   private scrollContainer!: Phaser.GameObjects.Container;
@@ -15,8 +11,6 @@ export class SettingsScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.listeningFor = null;
-    this.controlTexts = new Map();
     this.scrollY = 0;
 
     this.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'forest-bg')
@@ -55,42 +49,16 @@ export class SettingsScene extends Phaser.Scene {
     this.createToggle(cx, y, 'SHOW FPS', showFps, (v) => localStorage.setItem('fw-show-fps', v.toString()));
     y += 50;
 
-    // ── KEYBOARD CONTROLS ──
-    this.addSectionTitle(cx, y, 'KEYBOARD CONTROLS');
+    // ── BATTLE ──
+    this.addSectionTitle(cx, y, 'BATTLE');
     y += 25;
-    const kbControls = getControls('keyboard');
-    y = this.createControlBindings(cx, y, 'keyboard', kbControls);
-    y += 15;
 
-    // Reset keyboard to defaults
-    this.createSmallButton(cx, y, 'Reset Keyboard Defaults', 0x666666, () => {
-      resetControls();
-      this.scene.restart();
+    const storedBots = parseInt(localStorage.getItem('fw-bot-count') || '50', 10);
+    const initialBots = Math.max(15, Math.min(100, isNaN(storedBots) ? 50 : storedBots));
+    this.createIntSlider(cx, y, 'NUMBER OF BOTS', initialBots, 15, 100, (v) => {
+      localStorage.setItem('fw-bot-count', v.toString());
     });
-    y += 40;
-
-    // ── GAMEPAD CONTROLS ──
-    this.addSectionTitle(cx, y, 'GAMEPAD CONTROLS');
-    y += 25;
-    const gpControls = getControls('gamepad');
-    y = this.createControlBindings(cx, y, 'gamepad', gpControls);
-    y += 15;
-
-    // Reset gamepad to defaults
-    this.createSmallButton(cx, y, 'Reset Gamepad Defaults', 0x666666, () => {
-      resetControls();
-      this.scene.restart();
-    });
-    y += 40;
-
-    // ── TOUCH CONTROLS ──
-    this.addSectionTitle(cx, y, 'TOUCH CONTROLS (iPhone)');
-    y += 25;
-    const touchNote = this.add.text(cx, y, 'Left side: Move joystick\nRight side: Look\nButtons: Shoot, Car, Quit', {
-      fontSize: '9px', fontFamily: 'Arial, sans-serif', color: '#aaaaaa', align: 'center',
-    }).setOrigin(0.5, 0);
-    this.scrollContainer.add(touchNote);
-    y += 55;
+    y += 50;
 
     // ── DANGER ZONE ──
     this.addSectionTitle(cx, y, 'DANGER ZONE');
@@ -114,7 +82,6 @@ export class SettingsScene extends Phaser.Scene {
     this.add.rectangle(60, GAME_HEIGHT - 26, 80, 28, 0x000000, 0)
       .setInteractive({ useHandCursor: true }).setDepth(10)
       .on('pointerdown', () => {
-        this.cleanUp();
         this.cameras.main.fadeOut(200, 0, 0, 0);
         this.time.delayedCall(200, () => this.scene.start('CharacterSelectScene'));
       });
@@ -144,73 +111,6 @@ export class SettingsScene extends Phaser.Scene {
       }
     });
 
-    // Listen for keyboard rebinding
-    this.input.keyboard?.on('keydown', (event: KeyboardEvent) => {
-      if (!this.listeningFor || this.listeningFor.device !== 'keyboard') return;
-      const action = this.listeningFor.action;
-      const controls = getControls('keyboard');
-      const label = keyCodeToLabel(event.code);
-      controls[action] = { type: 'keyboard', code: event.code, label };
-      saveControls('keyboard', controls);
-      this.listeningFor.text.setText(label);
-      this.listeningFor.text.setColor('#ffffff');
-      this.listeningFor = null;
-    });
-
-    // Poll gamepad for rebinding
-    this.pollTimer = this.time.addEvent({
-      delay: 50,
-      loop: true,
-      callback: () => {
-        if (!this.listeningFor || this.listeningFor.device !== 'gamepad') return;
-        const gamepads = navigator.getGamepads?.();
-        if (!gamepads) return;
-        for (let i = 0; i < gamepads.length; i++) {
-          const gp = gamepads[i];
-          if (!gp) continue;
-          // Check buttons
-          for (let b = 0; b < gp.buttons.length; b++) {
-            if (gp.buttons[b].pressed) {
-              const action = this.listeningFor.action;
-              const controls = getControls('gamepad');
-              const label = gamepadButtonLabel(b);
-              if (b === 6 || b === 7) {
-                controls[action] = { type: 'gamepad-trigger', code: `trigger-${b}`, label };
-              } else {
-                controls[action] = { type: 'gamepad-button', code: `button-${b}`, label };
-              }
-              saveControls('gamepad', controls);
-              this.listeningFor.text.setText(label);
-              this.listeningFor.text.setColor('#ffffff');
-              this.listeningFor = null;
-              return;
-            }
-          }
-          // Check axes
-          for (let a = 0; a < gp.axes.length; a++) {
-            if (Math.abs(gp.axes[a]) > 0.7) {
-              const action = this.listeningFor.action;
-              const controls = getControls('gamepad');
-              const dir = gp.axes[a] > 0 ? 'pos' : 'neg';
-              const axisLabels: Record<string, string> = {
-                '0-neg': 'L Stick ←', '0-pos': 'L Stick →',
-                '1-neg': 'L Stick ↑', '1-pos': 'L Stick ↓',
-                '2-neg': 'R Stick ←', '2-pos': 'R Stick →',
-                '3-neg': 'R Stick ↑', '3-pos': 'R Stick ↓',
-              };
-              const label = axisLabels[`${a}-${dir}`] || `Axis ${a} ${dir}`;
-              controls[action] = { type: 'gamepad-axis', code: `axis-${a}-${dir}`, label };
-              saveControls('gamepad', controls);
-              this.listeningFor.text.setText(label);
-              this.listeningFor.text.setColor('#ffffff');
-              this.listeningFor = null;
-              return;
-            }
-          }
-        }
-      },
-    });
-
     this.cameras.main.fadeIn(300, 0, 0, 0);
   }
 
@@ -219,48 +119,6 @@ export class SettingsScene extends Phaser.Scene {
       fontSize: '12px', fontFamily: 'Arial Black, sans-serif', color: '#ffcc00',
     }).setOrigin(0.5);
     this.scrollContainer.add(t);
-  }
-
-  private createControlBindings(cx: number, startY: number, device: 'keyboard' | 'gamepad', controls: ControlScheme): number {
-    let y = startY;
-    const actions = Object.keys(ACTION_LABELS) as (keyof ControlScheme)[];
-
-    for (const action of actions) {
-      const binding = controls[action];
-      const labelText = this.add.text(cx - 90, y, ACTION_LABELS[action], {
-        fontSize: '9px', fontFamily: 'Arial, sans-serif', color: '#cccccc',
-      }).setOrigin(0, 0.5);
-      this.scrollContainer.add(labelText);
-
-      // Binding button
-      const btnBg = this.add.graphics();
-      btnBg.fillStyle(0x333355);
-      btnBg.fillRoundedRect(cx + 40, y - 10, 100, 20, 4);
-      this.scrollContainer.add(btnBg);
-
-      const bindText = this.add.text(cx + 90, y, binding.label, {
-        fontSize: '9px', fontFamily: 'Arial Black, sans-serif', color: '#ffffff',
-      }).setOrigin(0.5);
-      this.scrollContainer.add(bindText);
-      this.controlTexts.set(`${device}-${action}`, bindText);
-
-      const hitArea = this.add.rectangle(cx + 90, y, 100, 20, 0x000000, 0)
-        .setInteractive({ useHandCursor: true });
-      this.scrollContainer.add(hitArea);
-
-      hitArea.on('pointerdown', () => {
-        // Cancel previous listening
-        if (this.listeningFor) {
-          this.listeningFor.text.setColor('#ffffff');
-        }
-        this.listeningFor = { action, device, text: bindText };
-        bindText.setText('Press...');
-        bindText.setColor('#ffcc00');
-      });
-
-      y += 24;
-    }
-    return y;
   }
 
   private createSmallButton(x: number, y: number, label: string, color: number, onClick: () => void): void {
@@ -309,11 +167,58 @@ export class SettingsScene extends Phaser.Scene {
     this.scrollContainer.add(handle);
 
     handle.on('drag', (_p: Phaser.Input.Pointer, dragX: number) => {
-      const clamped = Math.max(startX, Math.min(startX + barW, dragX + this.scrollY * 0));
+      const clamped = Math.max(startX, Math.min(startX + barW, dragX));
       handle.x = clamped;
       const v = (clamped - startX) / barW;
       drawFill(v);
       onChange(v);
+    });
+  }
+
+  /** Slider that outputs a whole-number integer in [min, max], with a live readout shown to the right. */
+  private createIntSlider(x: number, y: number, label: string, value: number, min: number, max: number, onChange: (v: number) => void): void {
+    const barW = 140;
+    const barH = 8;
+    const startX = x - barW / 2;
+
+    const lbl = this.add.text(startX - 10, y, label, {
+      fontSize: '9px', fontFamily: 'Arial Black, sans-serif', color: '#cccccc',
+    }).setOrigin(1, 0.5);
+    this.scrollContainer.add(lbl);
+
+    const bg = this.add.graphics();
+    bg.fillStyle(0x333333);
+    bg.fillRoundedRect(startX, y - barH / 2, barW, barH, 4);
+    this.scrollContainer.add(bg);
+
+    const valueLabel = this.add.text(startX + barW + 10, y, `${value}`, {
+      fontSize: '11px', fontFamily: 'Arial Black, sans-serif', color: '#44ff88',
+    }).setOrigin(0, 0.5);
+    this.scrollContainer.add(valueLabel);
+
+    const fill = this.add.graphics();
+    const norm = (v: number) => (v - min) / (max - min);
+    const drawFill = (v: number) => {
+      fill.clear();
+      fill.fillStyle(0x44aaff);
+      fill.fillRoundedRect(startX, y - barH / 2, barW * norm(v), barH, 4);
+    };
+    drawFill(value);
+    this.scrollContainer.add(fill);
+
+    const handle = this.add.circle(startX + barW * norm(value), y, 7, 0xffffff);
+    handle.setInteractive({ useHandCursor: true, draggable: true });
+    this.scrollContainer.add(handle);
+
+    handle.on('drag', (_p: Phaser.Input.Pointer, dragX: number) => {
+      const clamped = Math.max(startX, Math.min(startX + barW, dragX));
+      handle.x = clamped;
+      const t = (clamped - startX) / barW;
+      const intVal = Math.round(min + t * (max - min));
+      handle.x = startX + barW * norm(intVal);
+      drawFill(intVal);
+      valueLabel.setText(`${intVal}`);
+      onChange(intVal);
     });
   }
 
@@ -341,13 +246,5 @@ export class SettingsScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => { on = !on; draw(); onChange(on); });
     this.scrollContainer.add(hit);
-  }
-
-  private cleanUp(): void {
-    if (this.pollTimer) {
-      this.pollTimer.remove();
-      this.pollTimer = null;
-    }
-    this.listeningFor = null;
   }
 }

@@ -22,3 +22,24 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 new Phaser.Game(config);
+
+// In dev, kill any old service workers + caches so iPhone Safari always gets fresh code.
+if (import.meta.env.DEV && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    for (const reg of regs) reg.unregister();
+  });
+  if (typeof caches !== 'undefined') {
+    caches.keys().then(keys => keys.forEach(k => caches.delete(k)));
+  }
+}
+
+// Dev-only: when any source file changes, fully reload the page instead of trying to
+// hot-swap (Phaser scenes don't survive hot-swap cleanly). Works on iPhone over LAN.
+if (import.meta.hot) {
+  import.meta.hot.on('vite:beforeUpdate', () => {
+    window.location.reload();
+  });
+  import.meta.hot.on('vite:afterUpdate', () => {
+    window.location.reload();
+  });
+}

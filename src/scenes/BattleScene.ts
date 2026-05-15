@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { WEAPONS } from '../config/game.config';
 import { NetworkManager } from '../network/NetworkManager';
 import { GameMessage, PlayerInfo } from '../network/MessageTypes';
@@ -72,13 +74,16 @@ export class BattleScene extends Phaser.Scene {
   private coinsEarned = 0;
   private carBtn: HTMLDivElement | null = null;
   private playerGun = 'None';
+  private playerAmmo = 0;
+  private ammoText!: HTMLDivElement;
+  private ammoPickups: { group: THREE.Group; picked: boolean }[] = [];
   private playerHealthBar!: THREE.Sprite;
   private playerHealthCtx!: CanvasRenderingContext2D;
   private playerHealthTex!: THREE.CanvasTexture;
 
   // Pickups
   private gunPickups: { group: THREE.Group; name: string; color: number; picked: boolean }[] = [];
-  private cheesePickups: { group: THREE.Group; picked: boolean }[] = [];
+  private cheesePickups: { group: THREE.Group; picked: boolean; name?: string }[] = [];
   private hudDiv!: HTMLDivElement;
   private hpText!: HTMLDivElement;
   private gunText!: HTMLDivElement;
@@ -93,8 +98,15 @@ export class BattleScene extends Phaser.Scene {
   private colliders: { x: number; z: number; r: number }[] = [];
   private roadSegments: { x1: number; z1: number; x2: number; z2: number }[] = [];
 
-  private getTerrainHeight(_wx: number, _wz: number): number {
-    return 0;
+  // Sum-of-sines terrain — gentle rolling hills. Same formula is used by the ground mesh
+  // and by every object that wants to sit on the terrain (NPCs, trees, rocks, pickups, etc.).
+  private getTerrainHeight(wx: number, wz: number): number {
+    return (
+      Math.sin(wx * 0.012) * 2.6 +
+      Math.cos(wz * 0.011) * 2.4 +
+      Math.sin((wx + wz) * 0.018) * 1.4 +
+      Math.cos((wx - wz) * 0.024) * 0.9
+    );
   }
   // Skeletal joints for player
   private pHips!: THREE.Group;
@@ -102,6 +114,7 @@ export class BattleScene extends Phaser.Scene {
   private pHead!: THREE.Group;
   private pLeftUpperArm!: THREE.Group; private pLeftForearm!: THREE.Group;
   private pRightUpperArm!: THREE.Group; private pRightForearm!: THREE.Group;
+  private pThirdGun?: THREE.Group;
   private pLeftThigh!: THREE.Group; private pLeftShin!: THREE.Group;
   private pRightThigh!: THREE.Group; private pRightShin!: THREE.Group;
 
@@ -138,7 +151,7 @@ export class BattleScene extends Phaser.Scene {
   }[] = [];
 
   // Cars
-  private cars: { mesh: THREE.Group; vx: number; vz: number; speed: number; driver: 'none' | 'player' | number; legPivots?: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[]; armPivots?: THREE.Group[]; tailPivots?: THREE.Group[]; jawPivot?: THREE.Group; neckBase?: THREE.Group; neckMid?: THREE.Group; bodyGroup?: THREE.Group; runPhase?: number; wanderAngle?: number; wanderTimer?: number; wanderSpeed?: number }[] = [];
+  private cars: { mesh: THREE.Group; vx: number; vz: number; speed: number; driver: 'none' | 'player' | number; legPivots?: { thighPivot: THREE.Group; shinPivot: THREE.Group; side: number }[]; armPivots?: THREE.Group[]; tailPivots?: THREE.Group[]; jawPivot?: THREE.Group; neckBase?: THREE.Group; neckMid?: THREE.Group; bodyGroup?: THREE.Group; glbHolder?: THREE.Group; mixer?: THREE.AnimationMixer; roarAction?: THREE.AnimationAction; deathAction?: THREE.AnimationAction; roarTimer?: number; runPhase?: number; wanderAngle?: number; wanderTimer?: number; wanderSpeed?: number; wheelPivots?: THREE.Group[]; isVehicle?: boolean; seatLocalY?: number; hp?: number; maxHp?: number; healthBar?: THREE.Sprite; healthCtx?: CanvasRenderingContext2D; healthTex?: THREE.CanvasTexture; dying?: boolean }[] = [];
   private playerInCar: number = -1; // index of car player is driving, -1 = on foot
 
   // T-Rex eat animation
@@ -272,6 +285,8 @@ export class BattleScene extends Phaser.Scene {
     this.playerMaxHP = 100 + armorBonus;
     this.playerHP = this.playerMaxHP;
     this.playerGun = 'None';
+    this.playerAmmo = 0;
+    this.ammoPickups = [];
     if (this.startLandX !== null && this.startLandZ !== null) {
       this.playerPos.set(this.startLandX, 0, this.startLandZ);
       this.lookAngle = this.startLookAngle ?? 0;
@@ -286,17 +301,8 @@ export class BattleScene extends Phaser.Scene {
     this.colliders = [];
     this.snowmen = [];
     this.evilHedgehogs = [];
-    // Always populate road grid for the landing map (even worlds without actual road meshes)
-    this.roadSegments = [
-      { x1: -450, z1: 0, x2: 450, z2: 0 },
-      { x1: -450, z1: 200, x2: 450, z2: 200 },
-      { x1: -450, z1: -200, x2: 450, z2: -200 },
-      { x1: 0, z1: -450, x2: 0, z2: 450 },
-      { x1: 200, z1: -450, x2: 200, z2: 450 },
-      { x1: -200, z1: -450, x2: -200, z2: 450 },
-      { x1: -350, z1: -350, x2: 350, z2: 350 },
-      { x1: -350, z1: 350, x2: 350, z2: -350 },
-    ];
+    // No roads anywhere — keep the array empty so the map screen doesn't draw any.
+    this.roadSegments = [];
     this.gunPickups = [];
     this.cheesePickups = [];
     this.shootCooldown = 0;
@@ -312,14 +318,16 @@ export class BattleScene extends Phaser.Scene {
     const phaserCanvas = this.game.canvas;
     phaserCanvas.style.display = 'none';
 
-    // Three.js renderer
-    this.threeRenderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+    // Three.js renderer — tuned for a more "real life" look without big perf hits.
+    const isMobile = 'ontouchstart' in window;
+    this.threeRenderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: 'high-performance' });
     this.threeRenderer.setSize(window.innerWidth, window.innerHeight);
-    this.threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
+    this.threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1 : 1.5));
     this.threeRenderer.shadowMap.enabled = true;
     this.threeRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.threeRenderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.threeRenderer.toneMappingExposure = 1.1;
+    this.threeRenderer.toneMappingExposure = 1.25; // brighter, more cinematic
+    this.threeRenderer.outputColorSpace = THREE.SRGBColorSpace; // accurate gamma -> photorealistic colors
     document.getElementById('game-container')!.appendChild(this.threeRenderer.domElement);
     this.threeRenderer.domElement.style.position = 'fixed';
     this.threeRenderer.domElement.style.top = '0';
@@ -393,6 +401,9 @@ export class BattleScene extends Phaser.Scene {
     // Camera — third person
     this.camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 2500);
     this.camera.position.set(0, 3, 6);
+
+    // Vite base URL prefix for loading models/textures from public/.
+    const baseUrl = (import.meta.env?.BASE_URL ?? '/');
 
     // First-person arms + guns — attached to camera so they always show.
     // Hands are placed EXACTLY at each gun's grip anchors; forearms extend down-back off-screen.
@@ -483,36 +494,26 @@ export class BattleScene extends Phaser.Scene {
       g.add(stub);
     };
 
-    // === ASSAULT RIFLE ===
+    // === ASSAULT RIFLE — real GLB model from Poly Pizza ===
     {
       const g = new THREE.Group();
-      // Receiver / upper body
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.09, 0.1, 0.42), metalMat, 0, 0.005, -0.2));
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.09, 0.04, 0.42), darkMetalMat, 0, 0.07, -0.2));
-      // Picatinny rail on top
-      for (let i = 0; i < 7; i++) g.add(this.makeMesh(new THREE.BoxGeometry(0.06, 0.008, 0.018), silverMat, 0, 0.095, -0.05 - i * 0.04));
-      // Barrel + gas block
-      g.add(this.makeMesh(new THREE.CylinderGeometry(0.022, 0.022, 0.5, 10), bluedMat, 0, 0.02, -0.55, Math.PI / 2));
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.05, 0.06, 0.06), darkMetalMat, 0, 0.02, -0.48));
-      // Muzzle brake
-      g.add(this.makeMesh(new THREE.CylinderGeometry(0.034, 0.034, 0.08, 10), darkMetalMat, 0, 0.02, -0.82, Math.PI / 2));
-      g.add(this.makeMesh(new THREE.CylinderGeometry(0.028, 0.028, 0.02, 10), bluedMat, 0, 0.02, -0.86, Math.PI / 2));
-      // Iron sights — front + rear
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.022, 0.05, 0.014), darkMetalMat, 0, 0.13, -0.45));
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.04, 0.04, 0.018), darkMetalMat, 0, 0.13, -0.06));
-      // Magazine well + curved mag
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.07, 0.08, 0.1), metalMat, 0, -0.08, -0.18));
-      const mag = this.makeMesh(new THREE.BoxGeometry(0.06, 0.18, 0.09), polymerMat, 0, -0.18, -0.15);
-      mag.rotation.x = -0.15;
-      g.add(mag);
-      // Charging handle
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.02, 0.04, 0.08), darkMetalMat, -0.05, 0.06, 0.05));
-      // Stock
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.06, 0.08, 0.08), polymerMat, 0, 0.02, 0.03));
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.07, 0.09, 0.2), polymerMat, 0, 0, 0.12));
-      g.add(this.makeMesh(new THREE.BoxGeometry(0.08, 0.11, 0.03), darkMetalMat, 0, 0, 0.22));
-      addPistolGrip(g, polymerMat);
-      addForegrip(g, polymerMat);
+      // Load asynchronously and add the model when ready, scaled to FP-view size.
+      new GLTFLoader().load(baseUrl + 'models/ar.glb', (gltf) => {
+        const ar = gltf.scene;
+        const bb = new THREE.Box3().setFromObject(ar);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const longest = Math.max(size.x, size.y, size.z) || 1;
+        const fit = 0.9 / longest; // ~0.9 units long, matches the procedural AR
+        ar.scale.setScalar(fit);
+        // Center the model around its bounding box, then nudge so the grip lands at GRIP_X,Y,Z.
+        const cx = (bb.min.x + bb.max.x) / 2 * fit;
+        const cy = (bb.min.y + bb.max.y) / 2 * fit;
+        const cz = (bb.min.z + bb.max.z) / 2 * fit;
+        ar.position.set(GRIP_X - cx, GRIP_Y - cy, GRIP_Z - 0.2 - cz);
+        ar.rotation.y = Math.PI; // muzzle pointing forward (toward camera -Z)
+        g.add(ar);
+      });
       gunHolder.add(g);
       this.fpGuns['ar'] = g;
     }
@@ -769,12 +770,12 @@ export class BattleScene extends Phaser.Scene {
     this.clock = new THREE.Clock();
 
     // === REALISTIC LIGHTING ===
-    // Soft ambient fill
-    const ambient = new THREE.AmbientLight(0x667788, 0.35);
+    // Lower ambient = more contrast, more "real life".
+    const ambient = new THREE.AmbientLight(0x506478, 0.22);
     this.scene3d.add(ambient);
 
-    // Main sun — warm golden light
-    const sun = new THREE.DirectionalLight(0xffeedd, 1.6);
+    // Main sun — warm golden direct light. Strong, like real sunlight.
+    const sun = new THREE.DirectionalLight(0xfff2d0, 2.4);
     sun.position.set(40, 60, 20);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -784,22 +785,18 @@ export class BattleScene extends Phaser.Scene {
     sun.shadow.camera.bottom = -120;
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 1200;
-    sun.shadow.bias = -0.001;
-    sun.shadow.normalBias = 0.02;
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.025;
+    sun.shadow.radius = 4; // soften the edge so shadows aren't pixelated
     this.scene3d.add(sun);
 
-    // Subtle warm ground-bounce light
-    const groundBounce = new THREE.PointLight(0xaa8844, 0.15);
-    groundBounce.position.set(0, 1, 0);
-    this.scene3d.add(groundBounce);
-
-    // Fill light from opposite side — cool blue
-    const fill = new THREE.DirectionalLight(0x8899cc, 0.3);
+    // Cool sky-blue fill light from opposite side — simulates skylight scattering.
+    const fill = new THREE.DirectionalLight(0xa8c8ff, 0.35);
     fill.position.set(-30, 40, -20);
     this.scene3d.add(fill);
 
-    // Sky/ground hemisphere
-    const hemi = new THREE.HemisphereLight(0x88aacc, 0x3a5a20, 0.5);
+    // Sky/ground hemisphere — top sky-blue, bottom warm earth, gives outdoor feel.
+    const hemi = new THREE.HemisphereLight(0x8fb4dd, 0x4a3a22, 0.55);
     this.scene3d.add(hemi);
 
     // === GROUND — flat square ===
@@ -892,12 +889,11 @@ export class BattleScene extends Phaser.Scene {
       paintBlotches(160, ['#8a7050', '#6e5638'], 5, 20, 0.35, 0.7); // rocky patches
       paintSpeckles(1600, ['#704828', '#9a7040', '#3a2814'], 1, 2); // pebbles
     } else {
-      // Snow — bright, icy, wind-swept
+      // Snow — bright, icy, wind-swept. Pure white/blue-tinted only — no dirt or earth showing through.
       gCtx.fillStyle = '#e8e8f0';
       gCtx.fillRect(0, 0, GC, GC);
       paintBlotches(1200, ['#dde0ea', '#f0f0f8', '#ccd0dd', '#e0e4ee', '#d0d8e8', '#f4f4fa', '#ffffff'], 15, 110, 0.55, 1);
       paintBlotches(160, ['#aaccee', '#88b0dd', '#cceeff'], 12, 50, 0.2, 0.45); // ice patches
-      paintBlotches(140, ['#7a7060', '#5a4838'], 4, 16, 0.18, 0.4); // dirt peeking through
       // Wind streaks
       for (let i = 0; i < 260; i++) {
         const sx = Math.random() * GC, sy = Math.random() * GC;
@@ -919,7 +915,18 @@ export class BattleScene extends Phaser.Scene {
     groundTexture.wrapT = THREE.RepeatWrapping;
     groundTexture.repeat.set(12, 12);
 
-    const groundGeo = new THREE.PlaneGeometry(1000, 1000);
+    // Hilly terrain — segmented plane displaced by getTerrainHeight() so the ground rolls.
+    const groundGeo = new THREE.PlaneGeometry(1000, 1000, 100, 100);
+    const positions = groundGeo.attributes.position;
+    for (let i = 0; i < positions.count; i++) {
+      // After we rotate the plane by -PI/2 around X, local (x, y, z) becomes world (x, z, -y).
+      // So the world coordinates that this vertex will sit at are: worldX = x, worldZ = -y.
+      const lx = positions.getX(i);
+      const ly = positions.getY(i);
+      const h = this.getTerrainHeight(lx, -ly);
+      positions.setZ(i, h);
+    }
+    groundGeo.computeVertexNormals();
     const groundMat = new THREE.MeshStandardMaterial({
       map: groundTexture,
       roughness: 0.95,
@@ -931,22 +938,73 @@ export class BattleScene extends Phaser.Scene {
     ground.receiveShadow = true;
     this.scene3d.add(ground);
 
-    // Dirt patches — 80 patches with varied sizes and tones
-    const dirtPatchColors = [0x6a5a3a, 0x7a6040, 0x5a4828, 0x8a6a44, 0xc8a86a];
-    for (let i = 0; i < 20; i++) {
-      const colorIndex = Math.floor(Math.random() * dirtPatchColors.length);
-      const patchMat = new THREE.MeshStandardMaterial({
-        color: dirtPatchColors[colorIndex],
-        roughness: 1,
-        metalness: 0,
+    // Real photo textures per biome — gives each world a "real life" feel.
+    const loader = new THREE.TextureLoader();
+    if (w === 0 || w === 1) {
+      // Grass — single photo, tiled.
+      loader.load(baseUrl + 'textures/grass.jpg', (tex) => {
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(60, 60);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        groundMat.map = tex;
+        groundMat.color.set(0xffffff);
+        groundMat.needsUpdate = true;
       });
-      const patchRadius = 1 + Math.random() * 4; // 1–5 range
-      const patch = new THREE.Mesh(new THREE.CircleGeometry(patchRadius, 10), patchMat);
-      patch.rotation.x = -Math.PI / 2;
-      const px = (Math.random() - 0.5) * 800;
-      const pz = (Math.random() - 0.5) * 800;
-      patch.position.set(px, this.getTerrainHeight(px, pz) + 0.02, pz);
-      this.scene3d.add(patch);
+    } else if (w === 2) {
+      // Sand — color + normal map.
+      loader.load(baseUrl + 'textures/sand.jpg', (tex) => {
+        tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(25, 25);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        groundMat.map = tex;
+        groundMat.color.set(0xffffff);
+        groundMat.needsUpdate = true;
+      });
+      loader.load(baseUrl + 'textures/sand_normal.jpg', (nrm) => {
+        nrm.wrapS = THREE.RepeatWrapping; nrm.wrapT = THREE.RepeatWrapping;
+        nrm.repeat.set(25, 25);
+        groundMat.normalMap = nrm;
+        groundMat.normalScale = new THREE.Vector2(1.2, 1.2);
+        groundMat.needsUpdate = true;
+      });
+    } else {
+      // Snow world — pure snow ground, no grass.
+      loader.load(baseUrl + 'textures/snow.jpg?v=2', (tex) => {
+        tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(22, 22);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        groundMat.map = tex;
+        groundMat.color.set(0xffffff);
+        groundMat.needsUpdate = true;
+      });
+      loader.load(baseUrl + 'textures/snow_normal.jpg?v=2', (nrm) => {
+        nrm.wrapS = THREE.RepeatWrapping; nrm.wrapT = THREE.RepeatWrapping;
+        nrm.repeat.set(22, 22);
+        groundMat.normalMap = nrm;
+        groundMat.normalScale = new THREE.Vector2(0.9, 0.9);
+        groundMat.needsUpdate = true;
+      });
+    }
+
+    // Dirt patches — 20 patches with varied sizes and tones. Skipped in the snow world.
+    if (w !== 3) {
+      const dirtPatchColors = [0x6a5a3a, 0x7a6040, 0x5a4828, 0x8a6a44, 0xc8a86a];
+      for (let i = 0; i < 20; i++) {
+        const colorIndex = Math.floor(Math.random() * dirtPatchColors.length);
+        const patchMat = new THREE.MeshStandardMaterial({
+          color: dirtPatchColors[colorIndex],
+          roughness: 1,
+          metalness: 0,
+        });
+        const patchRadius = 1 + Math.random() * 4; // 1–5 range
+        const patch = new THREE.Mesh(new THREE.CircleGeometry(patchRadius, 10), patchMat);
+        patch.rotation.x = -Math.PI / 2;
+        const px = (Math.random() - 0.5) * 800;
+        const pz = (Math.random() - 0.5) * 800;
+        patch.position.set(px, this.getTerrainHeight(px, pz) + 0.02, pz);
+        this.scene3d.add(patch);
+      }
     }
 
     // Small pebbles scattered near roads / ground (≈200 tiny rocks)
@@ -967,12 +1025,10 @@ export class BattleScene extends Phaser.Scene {
     const worldIdx = this.currentWorld % 4;
 
     if (worldIdx === 0) {
-      // BATTLEGROUND — original map
-      this.createRoads();
+      // BATTLEGROUND — original map (no roads)
       this.createTrees();
       this.createEiffelTower();
       this.createRocks();
-      this.createRiver();
       this.createBushes();
       this.createLogs();
       this.createGrass();
@@ -991,34 +1047,37 @@ export class BattleScene extends Phaser.Scene {
       this.createLogs(); // extra fallen logs
       this.createGrass();
       this.createGrass(); // thick undergrowth
-      this.createRiver();
       this.createMountains();
       this.createWorldExtras();
     } else if (worldIdx === 2) {
-      // DESERT — rocks, no trees, no river, cacti and sand dunes
-      this.createRoads();
+      // DESERT — rocks, no trees, no river, cacti and sand dunes (no roads)
       this.createRocks();
       this.createRocks(); // extra boulders
       this.createMountains();
       this.createWorldExtras();
       this.createDirtBikeStatue();
     } else {
-      // SNOW — some trees, frozen river, ice rocks, snowmen
+      // SNOW — some trees, ice rocks, snowmen. NO grass — it's all snow.
       this.createTrees();
       this.createRocks();
-      this.createRiver(); // frozen river
       this.createMountains();
-      this.createGrass();
       this.createWorldExtras();
       this.createSnowfall();
       this.createChristmasTree();
     }
 
     // === PICKUPS & ENTITIES (all worlds) ===
-    if (this.currentWorld % 4 === 0) this.createCheese(); // pizza only spawns in the Randomstuff world
+    // Health pickups: pizza in Randomstuff, chocolate-chip cookies in Snow.
+    if (this.currentWorld % 4 === 0) this.createCheese();
+    if (this.currentWorld % 4 === 3) this.createCookies();
+    // Bullet boxes scattered everywhere — every world.
+    this.createAmmo();
     this.createGuns();
     this.createCars();
-    this.createNPCs(this.isMultiplayer ? 0 : 50);
+    // Bot count is set from Settings (15–100, default 50)
+    const storedBots = parseInt(localStorage.getItem('fw-bot-count') || '50', 10);
+    const botCount = Math.max(15, Math.min(100, isNaN(storedBots) ? 50 : storedBots));
+    this.createNPCs(this.isMultiplayer ? 0 : botCount);
 
     // === MULTIPLAYER: setup network + remote players ===
     if (this.isMultiplayer) {
@@ -1064,33 +1123,32 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private showMapScreen(onLand: () => void): void {
-    // Compact UI chrome on short screens (phones in landscape) so the map gets more room.
+    // On phones (short screens), overlay the title/subtitle/legend on TOP of the map so the map gets the full screen.
     const isShort = window.innerHeight < 500;
-    const titleSize = isShort ? 14 : 28;
-    const subtitleSize = isShort ? 10 : 16;
-    const titleMargin = isShort ? 4 : 15;
-    const subtitleMargin = isShort ? 4 : 15;
+    const titleSize = isShort ? 12 : 28;
+    const subtitleSize = isShort ? 9 : 16;
+    const titleMargin = isShort ? 2 : 15;
+    const subtitleMargin = isShort ? 2 : 15;
     const legendSize = isShort ? 9 : 12;
     const legendMargin = isShort ? 4 : 10;
-    // Vertical chrome: title (≈size+margin) + subtitle (≈size+margin) + legend (≈size+margin) + small safety.
-    const chromeV = (titleSize + titleMargin) + (subtitleSize + subtitleMargin) + (legendSize + legendMargin) + 12;
-    const chromeH = isShort ? 12 : 40;
 
     // Create fullscreen map overlay
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:10000;background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;';
+    overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;z-index:10000;background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;${isShort ? 'gap:0;' : ''}`;
 
     const title = document.createElement('div');
     title.textContent = 'CHOOSE YOUR LANDING SPOT';
-    title.style.cssText = `color:#fff;font-family:sans-serif;font-size:${titleSize}px;font-weight:bold;margin-bottom:${titleMargin}px;text-shadow:0 0 10px #0af;letter-spacing:${isShort ? 1 : 3}px;`;
+    title.style.cssText = `color:#fff;font-family:sans-serif;font-size:${titleSize}px;font-weight:bold;margin-bottom:${titleMargin}px;text-shadow:0 0 10px #0af;letter-spacing:${isShort ? 1 : 3}px;${isShort ? 'position:absolute;top:4px;left:50%;transform:translateX(-50%);z-index:2;background:rgba(0,0,0,0.55);padding:2px 8px;border-radius:4px;pointer-events:none;' : ''}`;
     overlay.appendChild(title);
 
     const subtitle = document.createElement('div');
     subtitle.textContent = 'Tap, click, or use Xbox stick + A to land';
-    subtitle.style.cssText = `color:#aaa;font-family:sans-serif;font-size:${subtitleSize}px;margin-bottom:${subtitleMargin}px;`;
+    subtitle.style.cssText = `color:#aaa;font-family:sans-serif;font-size:${subtitleSize}px;margin-bottom:${subtitleMargin}px;${isShort ? 'position:absolute;top:20px;left:50%;transform:translateX(-50%);z-index:2;background:rgba(0,0,0,0.45);padding:1px 6px;border-radius:3px;pointer-events:none;' : ''}`;
     overlay.appendChild(subtitle);
 
-    // Map canvas
+    // Map canvas — on phones, fill the full short dimension (usually height); on desktop, subtract vertical chrome.
+    const chromeV = isShort ? 8 : (titleSize + titleMargin) + (subtitleSize + subtitleMargin) + (legendSize + legendMargin) + 12;
+    const chromeH = isShort ? 8 : 40;
     const mapSize = Math.min(window.innerWidth - chromeH, window.innerHeight - chromeV, 1200);
     const canvas = document.createElement('canvas');
     canvas.width = mapSize;
@@ -1187,17 +1245,6 @@ export class BattleScene extends Phaser.Scene {
     }
     ctx.setLineDash([]);
 
-    // Draw river/water
-    ctx.fillStyle = '#2266aa';
-    // Approximate river path as a thick line
-    ctx.strokeStyle = '#2266aa';
-    ctx.lineWidth = 12 * scale;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(toMap(-400, -500).x, toMap(-400, -500).y);
-    ctx.quadraticCurveTo(toMap(-200, 0).x, toMap(-200, 0).y, toMap(-350, 500).x, toMap(-350, 500).y);
-    ctx.stroke();
-
     // Draw mountains (big gray circles)
     for (const c of this.colliders) {
       if (c.r > 8) { // mountains are big colliders
@@ -1212,13 +1259,11 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
-    // Legend
+    // Legend — overlaid on phones so it doesn't eat map space.
     const legend = document.createElement('div');
-    legend.style.cssText = `color:#ccc;font-family:sans-serif;font-size:${legendSize}px;margin-top:${legendMargin}px;display:flex;gap:${isShort ? 8 : 15}px;flex-wrap:wrap;justify-content:center;`;
+    legend.style.cssText = `color:#ccc;font-family:sans-serif;font-size:${legendSize}px;margin-top:${legendMargin}px;display:flex;gap:${isShort ? 8 : 15}px;flex-wrap:wrap;justify-content:center;${isShort ? 'position:absolute;bottom:4px;left:50%;transform:translateX(-50%);z-index:2;background:rgba(0,0,0,0.55);padding:2px 6px;border-radius:4px;margin-top:0;pointer-events:none;' : ''}`;
     legend.innerHTML = [
       '<span style="color:#5a6a5a">● Mountains</span>',
-      '<span style="color:#2266aa">● River</span>',
-      '<span style="color:#444">● Roads</span>',
     ].join('');
     overlay.appendChild(legend);
 
@@ -1768,27 +1813,27 @@ export class BattleScene extends Phaser.Scene {
       legPivots.push({ thighPivot, shinPivot, footPivot, side });
     }
 
-    // === TINY ARMS with clawed fingers ===
+    // === REAL TINY T-REX ARMS — comically small ===
     const armPivots: THREE.Group[] = [];
     for (const side of [-1, 1]) {
       const armPivot = new THREE.Group();
-      armPivot.position.set(side * 0.65, 2.8, 1.3);
+      armPivot.position.set(side * 0.55, 2.95, 1.1);
       trex.add(armPivot);
-      // Upper arm
-      const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), mat(bodyLight));
-      upperArm.position.y = -0.18;
+      // Slim shoulder stub
+      const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 0.08), mat(bodyLight));
+      upperArm.position.y = -0.09;
       armPivot.add(upperArm);
-      // Forearm
-      const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.25, 0.1), mat(bodyMid));
-      forearm.position.set(0, -0.45, 0.05);
+      // Slimmer forearm
+      const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.13, 0.06), mat(bodyMid));
+      forearm.position.set(0, -0.24, 0.03);
       armPivot.add(forearm);
       // 2-fingered hand (T-Rex had 2 fingers!)
       for (const f of [-1, 1]) {
-        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.04), mat(bodyDark));
-        finger.position.set(f * 0.04, -0.6, 0.05);
+        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.06, 0.025), mat(bodyDark));
+        finger.position.set(f * 0.025, -0.33, 0.03);
         armPivot.add(finger);
-        const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 3), smoothMat(clawCol, 0.3));
-        fClaw.position.set(f * 0.04, -0.68, 0.05);
+        const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.014, 0.05, 3), smoothMat(clawCol, 0.3));
+        fClaw.position.set(f * 0.025, -0.38, 0.03);
         fClaw.rotation.x = Math.PI;
         armPivot.add(fClaw);
       }
@@ -2074,7 +2119,6 @@ export class BattleScene extends Phaser.Scene {
       this.updateBullets(dt);
       this.updateCars(dt);
       this.updateTRexEatAnim(dt);
-      this.updateBearBoss(dt);
       if (this.isMultiplayer) this.updateMultiplayer(dt);
       if (this.shootCooldown > 0) this.shootCooldown -= dt;
       if (this.carToggleCooldown > 0) this.carToggleCooldown -= dt;
@@ -2083,27 +2127,23 @@ export class BattleScene extends Phaser.Scene {
       this.updateHealthBar(this.playerHealthCtx, this.playerHealthTex, this.playerHP, this.playerMaxHP);
       for (const npc of this.npcs) {
         if (!npc.dead) {
-          this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 2);
+          this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 8);
           // Make health bar face camera
           npc.healthBar.lookAt(this.camera.position);
         }
       }
       this.playerHealthBar.lookAt(this.camera.position);
-      // Spawn boss/NPCs based on game mode
+      // Spawn NPCs based on game mode (no boss — there's no boss in this game).
       const aliveCount = this.npcs.filter(n => !n.dead).length;
       const isSnowWorld = this.currentWorld % 4 === 3;
       const aliveSnowmen = isSnowWorld ? this.snowmen.filter(s => s.hp > 0).length : 0;
       const totalAlive = aliveCount + aliveSnowmen;
       if (this.aliveText) {
-        this.aliveText.textContent = this.bossSpawned && !this.bossDead ? 'BOSS FIGHT!' : `Alive: ${totalAlive}`;
+        this.aliveText.textContent = `Alive: ${totalAlive}`;
       }
       // Win when all NPCs (and snowmen in the snow world) are dead
       if (totalAlive === 0) {
         this.showVictory();
-      }
-      if (!this.bossDead && this.bossSpawned && this.bossHealthBar) {
-        this.updateHealthBar(this.bossHealthCtx, this.bossHealthTex, this.bossHP, this.bossMaxHP);
-        this.bossHealthBar.lookAt(this.camera.position);
       }
       // Animate fountain water
       const ft = this.clock.elapsedTime;
@@ -2662,18 +2702,19 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private createSnowfall(): void {
-    const count = 3000;
+    // Heavy, real-life snowfall — many large flakes drifting down.
+    const count = 8000;
     const positions = new Float32Array(count * 3);
     this.snowVelocities = [];
-    const spread = 80;
+    const spread = 120;
     const px = this.playerPos.x;
     const pz = this.playerPos.z;
 
     for (let i = 0; i < count; i++) {
       positions[i * 3] = px + (Math.random() - 0.5) * spread;
-      positions[i * 3 + 1] = Math.random() * 30 + 2;
+      positions[i * 3 + 1] = Math.random() * 40 + 2;
       positions[i * 3 + 2] = pz + (Math.random() - 0.5) * spread;
-      this.snowVelocities.push(1.0 + Math.random() * 1.5);
+      this.snowVelocities.push(0.8 + Math.random() * 1.4);
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -2681,9 +2722,9 @@ export class BattleScene extends Phaser.Scene {
 
     const material = new THREE.PointsMaterial({
       color: 0xffffff,
-      size: 0.4,
+      size: 0.55,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.95,
       depthWrite: false,
       sizeAttenuation: true,
     });
@@ -4654,6 +4695,29 @@ export class BattleScene extends Phaser.Scene {
     this.pRightThigh = rightThigh;
     this.pRightShin = rightShin;
 
+    // Attach a 3rd-person AR rifle to the torso (chest level) — visible only when the player
+    // has an AR equipped. Same position as the title-scene bots so it matches.
+    const p3rdGunGroup = new THREE.Group();
+    p3rdGunGroup.position.set(0.15, 0.35, 0.45);
+    p3rdGunGroup.rotation.y = Math.PI;
+    p3rdGunGroup.visible = false;
+    new GLTFLoader().load(((import.meta.env?.BASE_URL ?? '/')) + 'models/ar.glb', (gltf) => {
+      const ar = gltf.scene;
+      const bb = new THREE.Box3().setFromObject(ar);
+      const sz = new THREE.Vector3();
+      bb.getSize(sz);
+      const longest = Math.max(sz.x, sz.y, sz.z) || 1;
+      const fit = 1.5 / longest;
+      ar.scale.setScalar(fit);
+      const cx = (bb.min.x + bb.max.x) / 2 * fit;
+      const cy = (bb.min.y + bb.max.y) / 2 * fit;
+      const cz = (bb.min.z + bb.max.z) / 2 * fit;
+      ar.position.set(-cx, -cy, -cz);
+      p3rdGunGroup.add(ar);
+    });
+    torso.add(p3rdGunGroup);
+    this.pThirdGun = p3rdGunGroup;
+
     // Attach equipped armor meshes
     this.attachArmorMeshes(torso, headGroup, hips, leftThigh, rightThigh, leftShin, rightShin, leftUpperArm, rightUpperArm);
 
@@ -5491,7 +5555,145 @@ export class BattleScene extends Phaser.Scene {
       group.rotation.x = (Math.random() - 0.5) * 0.15;
       group.rotation.z = (Math.random() - 0.5) * 0.15;
       this.scene3d.add(group);
-      this.cheesePickups.push({ group, picked: false });
+      this.cheesePickups.push({ group, picked: false, name: 'pizza' });
+    }
+  }
+
+  private updateAmmoText(): void {
+    if (!this.ammoText) return;
+    if (this.playerGun === 'None') {
+      this.ammoText.textContent = 'Bullets: —';
+      this.ammoText.style.color = '#888';
+      return;
+    }
+    const wep = Object.values(WEAPONS).find(w => w.name === this.playerGun);
+    if (!wep || wep.type === 'melee') {
+      this.ammoText.textContent = 'Bullets: ∞'; // melee weapons don't use ammo
+      this.ammoText.style.color = '#ffeebb';
+      return;
+    }
+    this.ammoText.textContent = 'Bullets: ' + this.playerAmmo;
+    this.ammoText.style.color = this.playerAmmo === 0 ? '#ff6644'
+      : this.playerAmmo < 8 ? '#ffaa44'
+      : '#ffeebb';
+  }
+
+  private createAmmo(): void {
+    // Bullet box: a small wooden crate with brass bullet tips poking out the top.
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4828, roughness: 0.85 });
+    const woodDarkMat = new THREE.MeshStandardMaterial({ color: 0x3a2618, roughness: 0.9 });
+    const brassMat = new THREE.MeshStandardMaterial({ color: 0xddaa44, roughness: 0.3, metalness: 0.85 });
+    const leadMat = new THREE.MeshStandardMaterial({ color: 0xb8b8c0, roughness: 0.4, metalness: 0.7 });
+
+    for (let i = 0; i < 150; i++) {
+      const group = new THREE.Group();
+
+      // Crate body
+      const crate = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.4, 0.45), woodMat);
+      crate.position.y = 0.2;
+      crate.castShadow = true;
+      group.add(crate);
+
+      // Dark trim along edges
+      for (const ex of [-0.31, 0.31]) {
+        const edge = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.42, 0.47), woodDarkMat);
+        edge.position.set(ex, 0.2, 0);
+        group.add(edge);
+      }
+
+      // Bullet rounds standing up on top
+      const rows = 3;
+      const cols = 5;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const bx = (c - (cols - 1) / 2) * 0.1;
+          const bz = (r - (rows - 1) / 2) * 0.1;
+
+          // Brass casing
+          const casing = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.12, 6), brassMat);
+          casing.position.set(bx, 0.46, bz);
+          group.add(casing);
+
+          // Lead tip
+          const tip = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.05, 6), leadMat);
+          tip.position.set(bx, 0.545, bz);
+          group.add(tip);
+        }
+      }
+
+      // Yellow "AMMO" tag (small flag) so it's spottable from a distance
+      const tag = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.01), new THREE.MeshStandardMaterial({ color: 0xffcc22, emissive: 0x885500, emissiveIntensity: 0.6 }));
+      tag.position.set(0, 0.7, 0.23);
+      group.add(tag);
+
+      const ax = (Math.random() - 0.5) * 900;
+      const az = (Math.random() - 0.5) * 900;
+      if (this.isOnRoad(ax, az)) continue;
+      group.position.set(ax, this.getTerrainHeight(ax, az), az);
+      group.rotation.y = Math.random() * Math.PI * 2;
+      this.scene3d.add(group);
+      this.ammoPickups.push({ group, picked: false });
+    }
+  }
+
+  private createCookies(): void {
+    // Chocolate-chip cookie — round dough disc with darker chips on top
+    const doughMat = new THREE.MeshStandardMaterial({ color: 0xd9a868, roughness: 0.85 });
+    const doughDarkMat = new THREE.MeshStandardMaterial({ color: 0xb6884a, roughness: 0.85 });
+    const chipMat = new THREE.MeshStandardMaterial({ color: 0x2a160a, roughness: 0.5 });
+
+    for (let i = 0; i < 200; i++) {
+      const group = new THREE.Group();
+      const sc = 0.8 + Math.random() * 0.4;
+
+      // Dough disc, slightly thicker in middle
+      const dough = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.32, 0.34, 0.08, 14, 1),
+        doughMat,
+      );
+      dough.castShadow = true;
+      group.add(dough);
+
+      // Slightly darker bottom (baked underside)
+      const bottom = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.34, 0.36, 0.012, 14, 1),
+        doughDarkMat,
+      );
+      bottom.position.y = -0.04;
+      group.add(bottom);
+
+      // Random browning spots on top
+      for (let s = 0; s < 6; s++) {
+        const spot = new THREE.Mesh(new THREE.SphereGeometry(0.04, 5, 5), doughDarkMat);
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 0.26;
+        spot.position.set(Math.cos(a) * r, 0.04, Math.sin(a) * r);
+        spot.scale.y = 0.25;
+        group.add(spot);
+      }
+
+      // Chocolate chips poking out of the top
+      const chipCount = 7 + Math.floor(Math.random() * 4);
+      for (let c = 0; c < chipCount; c++) {
+        const chip = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.08, 5), chipMat);
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 0.26;
+        chip.position.set(Math.cos(a) * r, 0.06, Math.sin(a) * r);
+        chip.rotation.x = (Math.random() - 0.5) * 0.4;
+        chip.rotation.z = (Math.random() - 0.5) * 0.4;
+        group.add(chip);
+      }
+
+      group.scale.setScalar(sc);
+      const cx = (Math.random() - 0.5) * 900;
+      const cz = (Math.random() - 0.5) * 900;
+      if (this.isOnRoad(cx, cz)) continue;
+      group.position.set(cx, this.getTerrainHeight(cx, cz) + 0.08, cz);
+      group.rotation.y = Math.random() * Math.PI * 2;
+      group.rotation.x = (Math.random() - 0.5) * 0.1;
+      group.rotation.z = (Math.random() - 0.5) * 0.1;
+      this.scene3d.add(group);
+      this.cheesePickups.push({ group, picked: false, name: 'cookie' });
     }
   }
 
@@ -5731,9 +5933,18 @@ export class BattleScene extends Phaser.Scene {
       shadow.position.y = 0.01;
       root.add(shadow);
 
-      // Place in world
-      const x = (Math.random() - 0.5) * 800;
-      const z = (Math.random() - 0.5) * 800;
+      // Place in world — keep NPCs at least 80 units away from the player's landing spot
+      // so they don't spawn right on top of you.
+      const safePx = this.startLandX ?? 0;
+      const safePz = this.startLandZ ?? 0;
+      let x = 0, z = 0;
+      for (let tries = 0; tries < 20; tries++) {
+        x = (Math.random() - 0.5) * 800;
+        z = (Math.random() - 0.5) * 800;
+        const dx = x - safePx;
+        const dz = z - safePz;
+        if (dx * dx + dz * dz > 80 * 80) break; // far enough — done
+      }
       root.position.set(x, this.getTerrainHeight(x, z), z);
       root.rotation.y = Math.random() * Math.PI * 2;
       // Health bar above NPC
@@ -5755,7 +5966,7 @@ export class BattleScene extends Phaser.Scene {
         rightThigh, rightShin,
         phase: Math.random() * Math.PI * 2,
         speed: 0,
-        hp: 2,
+        hp: 8,
         dead: false,
         healthBar: hb.sprite,
         healthCtx: hb.ctx,
@@ -5781,46 +5992,81 @@ export class BattleScene extends Phaser.Scene {
       { body: 0x3a2a2a, light: 0x5a4a4a },
     ];
 
+    // Real iguana-skin photograph used for all T-Rexes — gives them authentic scales.
+    const baseUrl = (import.meta.env?.BASE_URL ?? '/');
+    const trexSkin = new THREE.TextureLoader().load(baseUrl + 'textures/trex_skin.jpg');
+    trexSkin.wrapS = trexSkin.wrapT = THREE.RepeatWrapping;
+    trexSkin.repeat.set(3, 3);
+    trexSkin.colorSpace = THREE.SRGBColorSpace;
+
+    // Real 3D T-Rex model (.glb from Poly Pizza, rigged with Walk/Run/Idle animations).
+    // Once loaded, we clone the rig onto each T-Rex and play the Walk animation so the legs move.
+    const glbT_RexHolders: THREE.Group[] = [];
+    const proceduralT_RexParts: THREE.Group[] = [];
+    const carsWaitingForGlb: typeof this.cars = [];
+    new GLTFLoader().load(baseUrl + 'models/trex.glb', (gltf) => {
+      const src = gltf.scene;
+      const animations = gltf.animations;
+      const walkClip = animations.find(a => /walk/i.test(a.name)) ?? animations[0];
+      // Attack clip = mouth-opening lunge; we play it as a one-shot when the T-Rex roars.
+      const attackClip = animations.find(a => /attack|roar|bite/i.test(a.name));
+      const deathClip = animations.find(a => /death|die/i.test(a.name));
+
+      const bb = new THREE.Box3().setFromObject(src);
+      const size = new THREE.Vector3();
+      bb.getSize(size);
+      const longest = Math.max(size.x, size.y, size.z) || 1;
+      const targetSize = 9;
+      const fitScale = targetSize / longest;
+      const offsetY = -bb.min.y * fitScale;
+
+      for (let i = 0; i < glbT_RexHolders.length; i++) {
+        const holder = glbT_RexHolders[i];
+        // SkeletonUtils.clone() preserves rigging properly (a regular .clone() shares bones).
+        const clone = cloneSkinned(src) as THREE.Object3D;
+        clone.scale.setScalar(fitScale);
+        clone.position.y = offsetY;
+        holder.add(clone);
+        // Hook up animation playback for THIS clone.
+        if (walkClip) {
+          const mixer = new THREE.AnimationMixer(clone);
+          const walkAction = mixer.clipAction(walkClip);
+          walkAction.play();
+          mixer.setTime(Math.random() * walkClip.duration);
+          const car = carsWaitingForGlb[i];
+          if (car) {
+            car.mixer = mixer;
+            // Set up the roar (attack) action — slowed way down so the mouth stays
+            // open for the whole length of the actual roar audio.
+            if (attackClip) {
+              const roarAction = mixer.clipAction(attackClip);
+              roarAction.setLoop(THREE.LoopOnce, 1);
+              roarAction.clampWhenFinished = false;
+              roarAction.timeScale = 0.35; // ~3x slower so the roar lingers
+              car.roarAction = roarAction;
+            }
+            // Death animation — played when the T-Rex's HP runs out.
+            if (deathClip) {
+              const deathAction = mixer.clipAction(deathClip);
+              deathAction.setLoop(THREE.LoopOnce, 1);
+              deathAction.clampWhenFinished = true; // stay collapsed
+              car.deathAction = deathAction;
+            }
+            // Stagger first roar so all 8 don't roar at once.
+            car.roarTimer = 1 + Math.random() * 6;
+          }
+        }
+      }
+      for (const proc of proceduralT_RexParts) proc.visible = false;
+    });
+
     // T-Rexes (8)
     for (let i = 0; i < 8; i++) {
       const group = new THREE.Group();
       const rc = rexColors[i % rexColors.length];
 
-      // Procedural scaly skin texture (matches ride T-Rex)
-      const makeSkinTex = (base: number, variation = 0.15) => {
-        const cv = document.createElement('canvas');
-        cv.width = 64; cv.height = 64;
-        const cx2 = cv.getContext('2d')!;
-        const rr = (base >> 16) & 0xff, gg = (base >> 8) & 0xff, bb = base & 0xff;
-        cx2.fillStyle = `rgb(${rr},${gg},${bb})`;
-        cx2.fillRect(0, 0, 64, 64);
-        for (let sy = 0; sy < 64; sy += 4) {
-          for (let sx = 0; sx < 64; sx += 4) {
-            const off = ((sy / 4) % 2) * 2;
-            const v = (Math.random() - 0.5) * variation;
-            const sr = Math.max(0, Math.min(255, rr + rr * v));
-            const sg = Math.max(0, Math.min(255, gg + gg * v));
-            const sb = Math.max(0, Math.min(255, bb + bb * v));
-            cx2.fillStyle = `rgb(${sr|0},${sg|0},${sb|0})`;
-            cx2.fillRect(sx + off, sy, 3, 3);
-            cx2.fillStyle = `rgba(0,0,0,0.15)`;
-            cx2.fillRect(sx + off + 3, sy, 1, 3);
-            cx2.fillRect(sx + off, sy + 3, 4, 1);
-          }
-        }
-        cx2.strokeStyle = 'rgba(0,0,0,0.12)';
-        cx2.lineWidth = 1;
-        for (let ii = 0; ii < 5; ii++) {
-          cx2.beginPath();
-          cx2.moveTo(Math.random() * 64, Math.random() * 64);
-          cx2.lineTo(Math.random() * 64, Math.random() * 64);
-          cx2.stroke();
-        }
-        const tex = new THREE.CanvasTexture(cv);
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(2, 2);
-        return tex;
-      };
+      // Each T-Rex shares the photo skin but tints it with a different base color.
+      const makeSkinTex = (_base: number, _variation = 0.15) => trexSkin;
 
       const bodyDark = rc.body;
       const bodyMid = rc.body + 0x101008;
@@ -6054,20 +6300,23 @@ export class BattleScene extends Phaser.Scene {
         carLegPivots.push({ thighPivot, shinPivot, side });
       }
 
-      // === TINY ARMS ===
+      // === REAL TINY T-REX ARMS — comically small, just like the real thing ===
       const carArmPivots: THREE.Group[] = [];
       for (const side of [-1, 1]) {
         const armPivot = new THREE.Group();
-        armPivot.position.set(side * 0.65, 2.8, 1.3); group.add(armPivot);
-        const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), dmat(bodyLight));
-        upperArm.position.y = -0.18; armPivot.add(upperArm);
-        const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.25, 0.1), dmat(bodyMid));
-        forearm.position.set(0, -0.45, 0.05); armPivot.add(forearm);
+        armPivot.position.set(side * 0.55, 2.95, 1.1); group.add(armPivot);
+        // Slim shoulder stub
+        const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 0.08), dmat(bodyLight));
+        upperArm.position.y = -0.09; armPivot.add(upperArm);
+        // Even slimmer forearm
+        const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.13, 0.06), dmat(bodyMid));
+        forearm.position.set(0, -0.24, 0.03); armPivot.add(forearm);
+        // Two tiny fingers with little claws
         for (const f of [-1, 1]) {
-          const finger = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.04), dmat(bodyDark));
-          finger.position.set(f * 0.04, -0.6, 0.05); armPivot.add(finger);
-          const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 3), smoothMat2(clawCol, 0.3));
-          fClaw.position.set(f * 0.04, -0.68, 0.05); fClaw.rotation.x = Math.PI; armPivot.add(fClaw);
+          const finger = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.06, 0.025), dmat(bodyDark));
+          finger.position.set(f * 0.025, -0.33, 0.03); armPivot.add(finger);
+          const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.014, 0.05, 3), smoothMat2(clawCol, 0.3));
+          fClaw.position.set(f * 0.025, -0.38, 0.03); fClaw.rotation.x = Math.PI; armPivot.add(fClaw);
         }
         armPivot.rotation.z = side * 0.5; armPivot.rotation.x = -0.3;
         carArmPivots.push(armPivot);
@@ -6082,6 +6331,18 @@ export class BattleScene extends Phaser.Scene {
 
       group.scale.set(3, 3, 3);
 
+      // Register this T-Rex with the GLB loader. Once the real model loads, every T-Rex's
+      // procedural pieces (body, neck, head, tail, etc.) get hidden and the real model
+      // appears in the holder Group at the same position/scale.
+      const glbHolder = new THREE.Group();
+      group.add(glbHolder);
+      glbT_RexHolders.push(glbHolder);
+      // Collect every top-level Group/Mesh of this T-Rex so we can hide them when the GLB loads.
+      // (We added: bodyGroup + a bunch of pivots + ridge meshes via group.add().)
+      for (const child of group.children) {
+        if (child !== glbHolder) proceduralT_RexParts.push(child as THREE.Group);
+      }
+
       // Place T-Rex
       const angle = Math.random() * Math.PI * 2;
       const speed = 25 + Math.random() * 25; // slower than cars — they're dinosaurs
@@ -6091,12 +6352,18 @@ export class BattleScene extends Phaser.Scene {
       group.rotation.y = angle;
       this.scene3d.add(group);
 
-      this.cars.push({
+      // T-Rex health bar floating above the head.
+      const trexHb = this.createHealthBarSprite();
+      trexHb.sprite.position.set(0, 4.5, 0);
+      trexHb.sprite.scale.set(3, 0.35, 1);
+      group.add(trexHb.sprite);
+
+      const carEntry = {
         mesh: group,
         vx: 0,
         vz: 0,
         speed,
-        driver: 'none',
+        driver: 'none' as const,
         legPivots: carLegPivots,
         armPivots: carArmPivots,
         tailPivots: carTailPivots,
@@ -6104,8 +6371,16 @@ export class BattleScene extends Phaser.Scene {
         neckBase,
         neckMid,
         bodyGroup,
+        glbHolder,
         runPhase: Math.random() * Math.PI * 2,
-      });
+        hp: 30,
+        maxHp: 30,
+        healthBar: trexHb.sprite,
+        healthCtx: trexHb.ctx,
+        healthTex: trexHb.texture,
+      };
+      this.cars.push(carEntry);
+      carsWaitingForGlb.push(carEntry);
     }
 
     // === TRICERATOPS (6) — big, stocky, 3 horns, frill ===
@@ -6881,7 +7156,7 @@ export class BattleScene extends Phaser.Scene {
     group.position.set(cx2, this.getTerrainHeight(cx2, cz2), cz2);
     group.rotation.y = Math.random() * Math.PI * 2;
     this.scene3d.add(group);
-    this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 30, driver: 'none', runPhase: 0 });
+    this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 30, driver: 'none', runPhase: 0, isVehicle: true });
   }
 
   private createChristmasTree(): void {
@@ -7076,6 +7351,217 @@ export class BattleScene extends Phaser.Scene {
     for (let i = 0; i < 5; i++) this.createAnimalRide('bear', 0x5a3a1a, 0x7a5a3a, 2.2, 14);
     for (let i = 0; i < 5; i++) this.createAnimalRide('wolf', 0x6a6a6a, 0x9a9a9a, 1.8, 24);
     for (let i = 0; i < 5; i++) this.createAnimalRide('deer', 0x9a7040, 0xc8a870, 2.0, 22);
+    // Quads (ATVs) — parked around the forest, mount with C key.
+    const quadColors = [0xcc2222, 0x2266cc, 0x44aa44, 0xee9911, 0x222222, 0xaa22cc, 0xffdd44, 0x44ddff, 0xff66bb, 0x88ff44, 0xffffff, 0x884422];
+    for (let i = 0; i < 16; i++) this.createQuad(quadColors[i % quadColors.length]);
+  }
+
+  private createQuad(bodyColor: number): void {
+    const group = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.45, metalness: 0.5 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 });
+    const blackMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 });
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0xb8b8c0, roughness: 0.3, metalness: 0.85 });
+    const seatMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.85 });
+    const seatStitchMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.7 });
+    const lightMat = new THREE.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffcc44, emissiveIntensity: 1.2 });
+    const taillightMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 0.7 });
+    const exhaustMat = new THREE.MeshStandardMaterial({ color: 0x666666, roughness: 0.4, metalness: 0.9 });
+
+    // Main body group — y is wheel-axle height
+    const body = new THREE.Group();
+    body.position.y = 0.45;
+    group.add(body);
+
+    // Skid plate / underside (low, between wheels)
+    const skid = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.08, 1.6), trimMat);
+    skid.position.y = -0.05;
+    body.add(skid);
+
+    // Main chassis — shaped tank-style with sloped front and rear
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.35, 1.65), bodyMat);
+    chassis.position.y = 0.18;
+    chassis.castShadow = true;
+    body.add(chassis);
+
+    // Sloped fuel-tank hump in front of seat
+    const tank = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.28, 0.55), bodyMat);
+    tank.position.set(0, 0.45, 0.25);
+    tank.rotation.x = -0.15;
+    body.add(tank);
+
+    // Front fender — wraps over front wheels
+    const frontFenderL = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 0.7), bodyMat);
+    frontFenderL.position.set(-0.55, 0.32, 0.7);
+    body.add(frontFenderL);
+    const frontFenderR = frontFenderL.clone();
+    frontFenderR.position.x = 0.55;
+    body.add(frontFenderR);
+    // Curved fender top across the front
+    const fenderTop = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.08, 0.3), bodyMat);
+    fenderTop.position.set(0, 0.42, 0.95);
+    fenderTop.rotation.x = -0.2;
+    body.add(fenderTop);
+
+    // Rear fenders
+    const rearFenderL = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 0.7), bodyMat);
+    rearFenderL.position.set(-0.55, 0.32, -0.7);
+    body.add(rearFenderL);
+    const rearFenderR = rearFenderL.clone();
+    rearFenderR.position.x = 0.55;
+    body.add(rearFenderR);
+
+    // Cargo rack (rear)
+    const rearRack = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.06, 0.55), trimMat);
+    rearRack.position.set(0, 0.5, -0.7);
+    body.add(rearRack);
+    for (const sx of [-0.43, 0.43]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.18, 0.55), trimMat);
+      rail.position.set(sx, 0.6, -0.7);
+      body.add(rail);
+    }
+
+    // Number plate (front)
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.18, 0.04), trimMat);
+    plate.position.set(0, 0.45, 1.1);
+    plate.rotation.x = -0.25;
+    body.add(plate);
+
+    // Headlights (twin)
+    for (const sx of [-0.28, 0.28]) {
+      const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 12), trimMat);
+      housing.rotation.x = Math.PI / 2;
+      housing.position.set(sx, 0.55, 1.05);
+      body.add(housing);
+      const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.04, 12), lightMat);
+      lens.rotation.x = Math.PI / 2;
+      lens.position.set(sx, 0.55, 1.08);
+      body.add(lens);
+    }
+
+    // Tail lights
+    for (const sx of [-0.34, 0.34]) {
+      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.06, 0.04), taillightMat);
+      tail.position.set(sx, 0.42, -1.05);
+      body.add(tail);
+    }
+
+    // Seat — long, slightly raised toward rear
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.12, 0.85), seatMat);
+    seat.position.set(0, 0.55, -0.15);
+    body.add(seat);
+    // Seat stitching (decorative line down middle)
+    const stitch = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.13, 0.85), seatStitchMat);
+    stitch.position.set(0, 0.55, -0.15);
+    body.add(stitch);
+    // Seat backrest
+    const seatBack = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.22, 0.08), seatMat);
+    seatBack.position.set(0, 0.66, -0.55);
+    body.add(seatBack);
+
+    // Handlebar post + bars
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.5, 8), trimMat);
+    post.position.set(0, 0.7, 0.55);
+    post.rotation.x = -0.25;
+    body.add(post);
+    const bars = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.85, 8), trimMat);
+    bars.rotation.z = Math.PI / 2;
+    bars.position.set(0, 0.92, 0.6);
+    body.add(bars);
+    for (const sx of [-0.4, 0.4]) {
+      const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.14, 8), seatMat);
+      grip.rotation.z = Math.PI / 2;
+      grip.position.set(sx, 0.92, 0.6);
+      body.add(grip);
+      // brake/throttle lever
+      const lever = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.02, 0.12), trimMat);
+      lever.position.set(sx * 0.85, 0.86, 0.65);
+      lever.rotation.y = sx > 0 ? -0.4 : 0.4;
+      body.add(lever);
+    }
+    // Speedometer cluster
+    const cluster = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.04, 12), trimMat);
+    cluster.rotation.x = Math.PI / 2;
+    cluster.position.set(0, 0.86, 0.62);
+    body.add(cluster);
+
+    // Footrests (rider rests feet here)
+    for (const sx of [-0.55, 0.55]) {
+      const peg = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.32), trimMat);
+      peg.position.set(sx, 0.0, -0.05);
+      body.add(peg);
+    }
+
+    // Exhaust pipe (right side, sweeping back)
+    const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.3, 10), exhaustMat);
+    exhaust.rotation.x = Math.PI / 2;
+    exhaust.position.set(0.55, 0.18, -0.4);
+    body.add(exhaust);
+    const exhaustTip = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.12, 10), exhaustMat);
+    exhaustTip.rotation.x = Math.PI / 2;
+    exhaustTip.position.set(0.55, 0.18, -1.1);
+    body.add(exhaustTip);
+
+    // 4 wheels — each in its own pivot Group so we can spin them.
+    // Local Y of axle is 0.45 (matches body.position.y), wheel radius 0.45.
+    const wheelPivots: THREE.Group[] = [];
+    const wheelOffsets = [
+      { x: -0.65, z:  0.78 },
+      { x:  0.65, z:  0.78 },
+      { x: -0.65, z: -0.78 },
+      { x:  0.65, z: -0.78 },
+    ];
+    for (const off of wheelOffsets) {
+      const pivot = new THREE.Group();
+      pivot.position.set(off.x, 0.45, off.z);
+      group.add(pivot);
+      // tire
+      const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.36, 16), tireMat);
+      tire.rotation.z = Math.PI / 2;
+      pivot.add(tire);
+      // rim hub
+      const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.38, 10), rimMat);
+      rim.rotation.z = Math.PI / 2;
+      pivot.add(rim);
+      // hub cap (raised center)
+      const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.42, 10), trimMat);
+      hub.rotation.z = Math.PI / 2;
+      pivot.add(hub);
+      // tread blocks
+      for (let s = 0; s < 8; s++) {
+        const tread = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.08, 0.1), blackMat);
+        const a = (s / 8) * Math.PI * 2;
+        tread.position.set(0, Math.sin(a) * 0.4, Math.cos(a) * 0.4);
+        tread.rotation.x = a;
+        pivot.add(tread);
+      }
+      wheelPivots.push(pivot);
+    }
+
+    const qx = (Math.random() - 0.5) * 800;
+    const qz = (Math.random() - 0.5) * 800;
+    group.position.set(qx, this.getTerrainHeight(qx, qz), qz);
+    group.rotation.y = Math.random() * Math.PI * 2;
+    group.scale.set(2.6, 2.6, 2.6); // BIG quads
+    this.scene3d.add(group);
+
+    // The seat-top in this model is at local y ≈ 1.06 (body 0.45 + seat 0.55 + half-thickness 0.06).
+    // Player model origin is at the FEET; the hips are 0.95 above origin in player-local space.
+    // To put the rider's hips at the seat-top in world space, we use seatLocalY = (1.06 - 0.95/scale).
+    // With scale 2.6, that's about 0.69.
+    this.cars.push({
+      mesh: group,
+      vx: 0,
+      vz: 0,
+      speed: 45,
+      driver: 'none',
+      runPhase: 0,
+      wheelPivots,
+      bodyGroup: body,
+      isVehicle: true,
+      seatLocalY: 0.69,
+    });
   }
 
   private createSnowAnimals(): void {
@@ -7101,7 +7587,7 @@ export class BattleScene extends Phaser.Scene {
         const dist = Math.sqrt(dx * dx + dz * dz);
         if (dist < 4) {
           car.driver = this.npcs.indexOf(npc);
-          npc.mesh.visible = false; // hide NPC, they're in the car
+          // Keep the NPC visible — we'll place them on the seat so the player can see who's riding.
           break;
         }
       }
@@ -7112,6 +7598,12 @@ export class BattleScene extends Phaser.Scene {
 
     for (let ci = 0; ci < this.cars.length; ci++) {
       const car = this.cars[ci];
+
+      // Dying T-Rexes just play their death animation and don't move/stomp.
+      if (car.dying) {
+        if (car.mixer) car.mixer.update(dt);
+        continue;
+      }
 
       if (car.driver === 'player') {
         // Player drives — car follows look direction, with strafe from moveDir.x
@@ -7132,11 +7624,16 @@ export class BattleScene extends Phaser.Scene {
         this.playerPos.set(car.mesh.position.x, car.mesh.position.y, car.mesh.position.z);
         this.playerModel.visible = !this.firstPerson;
         const seatBounce = Math.abs(Math.sin((car.runPhase || 0))) * 0.15;
-        // Seat height — sit right on the dino's back
+        // Seat height — sit right on the back / seat. seatLocalY is the seat's Y in the model's local space.
         const dinoScale = car.mesh.scale.y;
-        const bodyY = car.bodyGroup ? car.bodyGroup.position.y : 2.0;
-        const bodyHalfH = 0.7; // half the body mesh height roughly
-        const seatHeight = (bodyY + bodyHalfH) * dinoScale;
+        let seatHeight: number;
+        if (typeof car.seatLocalY === 'number') {
+          seatHeight = car.seatLocalY * dinoScale;
+        } else {
+          const bodyY = car.bodyGroup ? car.bodyGroup.position.y : 2.0;
+          const bodyHalfH = 0.7; // half the body mesh height roughly
+          seatHeight = (bodyY + bodyHalfH) * dinoScale;
+        }
         this.playerModel.position.set(car.mesh.position.x, car.mesh.position.y + seatHeight + seatBounce, car.mesh.position.z);
         this.playerModel.rotation.y = this.lookAngle + Math.PI;
         // Riding pose — sitting with legs in stirrups, arms holding reins
@@ -7152,7 +7649,7 @@ export class BattleScene extends Phaser.Scene {
         // Update engine pitch based on actual speed
         const actualSpd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
       } else if (typeof car.driver === 'number') {
-        // NPC drives — chase nearest enemy
+        // NPC drives — chase nearest enemy (other NPCs OR the player)
         const npc = this.npcs[car.driver];
         if (!npc || npc.dead) {
           car.driver = 'none';
@@ -7161,7 +7658,7 @@ export class BattleScene extends Phaser.Scene {
           continue;
         }
 
-        // Find nearest NPC target to chase (prefer NPCs over player)
+        // Pick the nearest enemy: other NPCs (not in cars) and the player.
         let tx = 0, tz = 0;
         let bestDist = 99999;
         for (let j = 0; j < this.npcs.length; j++) {
@@ -7177,7 +7674,7 @@ export class BattleScene extends Phaser.Scene {
             tz = this.npcs[j].mesh.position.z;
           }
         }
-        // T-Rex does NOT chase the player — only NPCs
+        // T-Rex/quad riders only chase OTHER NPCs — not the player.
 
         const ddx = tx - car.mesh.position.x;
         const ddz = tz - car.mesh.position.z;
@@ -7192,17 +7689,40 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
         if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz);
 
-        // Sync NPC pos to car
-        npc.mesh.position.copy(car.mesh.position);
-        // Update NPC car engine pitch
-        const npcSpd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
+        // Place the NPC rider visibly on the seat (same math as the player rider).
+        const dinoScale = car.mesh.scale.y;
+        let seatHeight: number;
+        if (typeof car.seatLocalY === 'number') {
+          seatHeight = car.seatLocalY * dinoScale;
+        } else {
+          const bodyY = car.bodyGroup ? car.bodyGroup.position.y : 2.0;
+          const bodyHalfH = 0.7;
+          seatHeight = (bodyY + bodyHalfH) * dinoScale;
+        }
+        const npcSeatBounce = Math.abs(Math.sin((car.runPhase || 0))) * 0.15;
+        npc.mesh.visible = true;
+        npc.mesh.position.set(car.mesh.position.x, car.mesh.position.y + seatHeight + npcSeatBounce, car.mesh.position.z);
+        npc.mesh.rotation.y = car.mesh.rotation.y;
+        // Riding pose for the NPC — sitting with bent legs, arms forward holding reins.
+        npc.leftThigh.rotation.x = -1.4;
+        npc.rightThigh.rotation.x = -1.4;
+        npc.leftShin.rotation.x = 1.2;
+        npc.rightShin.rotation.x = 1.2;
+        npc.leftUpperArm.rotation.x = -0.8;
+        npc.leftForearm.rotation.x = -0.6;
+        npc.rightUpperArm.rotation.x = -0.8;
+        npc.rightForearm.rotation.x = -0.6;
+      } else if (car.isVehicle) {
+        // Quads, dirt bikes, etc. — sit still until a player mounts them.
+        car.vx = 0;
+        car.vz = 0;
       } else {
-        // No driver — wild T-Rex wanders peacefully, waiting to be ridden
+        // No driver — wild T-Rex / animal wanders peacefully, waiting to be ridden
         car.wanderTimer = (car.wanderTimer ?? 0) - dt;
         if (car.wanderTimer <= 0 || car.wanderAngle === undefined) {
           car.wanderAngle = Math.random() * Math.PI * 2;
           car.wanderTimer = 3 + Math.random() * 4;
-          car.wanderSpeed = 4 + Math.random() * 4; // slow gentle stroll
+          car.wanderSpeed = 12 + Math.random() * 10; // T-Rex stomping along, not strolling
         }
         const wSpd = car.wanderSpeed ?? 5;
         car.vx = Math.sin(car.wanderAngle) * wSpd;
@@ -7228,9 +7748,8 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.z = Math.sign(car.mesh.position.z) * 449;
       }
 
-      // T-Rex doesn't attack player — just roams around
-
-      // T-Rex only stomps NPCs when someone is riding it — wild T-Rexes are peaceful
+      // T-Rex / quad ride only stomps things when SOMEONE (player or NPC) is riding it.
+      // Wild rides are peaceful.
       if (car.driver !== 'none') {
         for (let ni = 0; ni < this.npcs.length; ni++) {
           const npc = this.npcs[ni];
@@ -7241,39 +7760,60 @@ export class BattleScene extends Phaser.Scene {
           const ndz = npc.mesh.position.z - car.mesh.position.z;
           const ndist = Math.sqrt(ndx * ndx + ndz * ndz);
           if (ndist < 2.5) {
-            this.killNpc(npc);
-            this.showPickupMsg('SQUISHED!');
-            this.spawnDeathFluff(npc.mesh.position.clone());
+            // Stomp damages instead of insta-killing — takes 20 stomps to kill (0.4 dmg × 20 = 8 hp).
+            npc.hp -= 0.4;
+            this.playSfx('hit', 0.4);
+            if (npc.hp <= 0) {
+              this.killNpc(npc);
+              this.showPickupMsg('SQUISHED!');
+              this.spawnDeathFluff(npc.mesh.position.clone());
+            } else {
+              this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 8);
+            }
           }
         }
-      }
 
-      // T-Rex attacks bear boss — only when ridden
-      if (car.driver !== 'none' && !this.bossDead && this.bossSpawned && this.boss) {
-        const bdx = car.mesh.position.x - this.boss.position.x;
-        const bdz = car.mesh.position.z - this.boss.position.z;
-        const bdist = Math.sqrt(bdx * bdx + bdz * bdz);
-        if (bdist < 4 && car.speed > 3) {
-          const damage = Math.round(car.speed * 5);
-          this.bossHP -= damage;
-          this.playSfx('carHit', 0.8);
-          this.bossRoarTimer = 0.8;
-          this.playSfx('roar', 0.7);
-          // T-Rex recoils from the fight
-          car.speed *= -0.5;
-          if (this.bossHP <= 0) {
-            this.bossDead = true;
-            this.coinsEarned += 1000;
-            this.spawnDeathFluff(this.boss.position.clone(), 40);
-            this.scene3d.remove(this.boss);
-            this.playSfx('bossDeath', 0.8);
-            setTimeout(() => this.showVictory(), 1500);
-          }
-        }
+        // T-Rexes / quads no longer stomp the player — they only stomp NPCs.
       }
 
       // Running animation — works for all dino types
       const spd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
+
+      // Advance any rigged GLB animation (T-Rex legs, etc.). Time scale tracks ground speed
+      // so legs move faster when running, slower when standing still.
+      if (car.mixer) {
+        const animSpeed = Math.max(0.4, Math.min(2, spd / 12));
+        car.mixer.update(dt * animSpeed);
+      }
+
+      // T-Rex roar — random timer per car triggers a mouth-open attack animation + roar sound.
+      if (car.roarAction && typeof car.roarTimer === 'number') {
+        car.roarTimer -= dt;
+        if (car.roarTimer <= 0) {
+          car.roarAction.reset();
+          car.roarAction.play();
+          // Audible up to 200 units away. Closer = louder, plus you can SEE it on screen.
+          const rdx = car.mesh.position.x - this.playerPos.x;
+          const rdz = car.mesh.position.z - this.playerPos.z;
+          const dist = Math.sqrt(rdx * rdx + rdz * rdz);
+          if (dist < 200) {
+            const vol = Math.max(0.2, 1 - dist / 200) * 0.95;
+            this.playSfx('roar', vol);
+            // Pop a "🦖 ROAAR!" message on screen if the T-Rex is reasonably close.
+            if (dist < 120) this.showPickupMsg('🦖 ROAAAAR!');
+          }
+          car.roarTimer = 3 + Math.random() * 7; // next roar in 3–10 seconds (much more often)
+        }
+      }
+
+      // Quad wheel spin (works whether moving or stopped — only visible while moving)
+      if (car.wheelPivots) {
+        const wheelSpinSpeed = spd * 1.2;
+        for (const wheel of car.wheelPivots) {
+          wheel.rotation.x += wheelSpinSpeed * dt;
+        }
+      }
+
       if (spd > 1 && car.legPivots) {
         car.runPhase = (car.runPhase || 0) + dt * 7;
         const rc = car.runPhase;
@@ -7285,6 +7825,8 @@ export class BattleScene extends Phaser.Scene {
           car.bodyGroup.position.y = baseY + Math.abs(Math.sin(rc)) * 0.15;
           car.bodyGroup.rotation.x = Math.sin(rc) * 0.03;
         }
+
+        // GLB T-Rexes use their built-in walk animation (mixer above) — no fake bob needed.
 
         // Neck sway
         if (car.neckBase) {
@@ -8006,28 +8548,53 @@ export class BattleScene extends Phaser.Scene {
       setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyQ' })), 80);
     }, { passive: false });
 
-    // === AUTO-FIRE (hold to rapid fire) ===
+    // === TOGGLE AUTO-FIRE (tap to start, tap again to stop) ===
+    // This frees your thumb so you can walk + aim while the game keeps shooting.
     let shootInterval: number | null = null;
+    const stopFiring = () => {
+      if (shootInterval) { clearInterval(shootInterval); shootInterval = null; }
+      shootBtn.style.background = 'rgba(255,40,40,0.55)';
+      shootBtn.style.borderColor = 'rgba(255,100,100,0.7)';
+      shootBtn.textContent = 'FIRE';
+    };
+    const startFiring = () => {
+      this.tryShoot();
+      shootInterval = window.setInterval(() => this.tryShoot(), 100);
+      shootBtn.style.background = 'rgba(255,200,40,0.75)';
+      shootBtn.style.borderColor = 'rgba(255,230,80,0.9)';
+      shootBtn.textContent = 'STOP';
+    };
+    // Debounce taps so iOS doesn't double-fire (which can leave you stuck "firing" when you meant to stop).
+    let lastShootTap = 0;
+    const toggleFire = () => {
+      const now = Date.now();
+      if (now - lastShootTap < 280) return;
+      lastShootTap = now;
+      if (shootInterval) stopFiring();
+      else startFiring();
+    };
     shootBtn.addEventListener('touchstart', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.tryShoot();
-      shootInterval = window.setInterval(() => this.tryShoot(), 100); // faster fire rate on mobile
+      toggleFire();
     }, { passive: false });
+    // Swallow the touchend so it doesn't bubble into a synthetic click that re-toggles.
     shootBtn.addEventListener('touchend', (e) => {
       e.preventDefault();
-      if (shootInterval) { clearInterval(shootInterval); shootInterval = null; }
+      e.stopPropagation();
     }, { passive: false });
-    shootBtn.addEventListener('touchcancel', () => {
-      if (shootInterval) { clearInterval(shootInterval); shootInterval = null; }
+    shootBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleFire();
     });
 
-    // Car button — enter/exit nearest car
+    // Car/dino button — enter/exit nearest ride. Keyboard binding is KeyC.
     carBtn.addEventListener('touchstart', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const evt = new KeyboardEvent('keydown', { code: 'KeyZ' });
-      window.dispatchEvent(evt);
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC' }));
+      setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyC' })), 80);
     }, { passive: false });
 
     // === FLOATING JOYSTICK TOUCH HANDLING ===
@@ -8364,6 +8931,18 @@ export class BattleScene extends Phaser.Scene {
     const cooldown = wep ? wep.cooldown : 500;
     const bulletSpeed = 80;
 
+    // Melee weapons don't use ammo; everything else does.
+    const usesAmmo = !!wep && wep.type !== 'melee';
+    if (usesAmmo) {
+      if (this.playerAmmo <= 0) {
+        this.showPickupMsg('Out of bullets!');
+        this.shootCooldown = 0.3; // brief stutter so message doesn't spam
+        return;
+      }
+      this.playerAmmo--;
+      this.updateAmmoText();
+    }
+
     this.shootCooldown = cooldown / 1000; // convert ms to seconds
 
     // Bullet direction from look angle + pitch
@@ -8420,8 +8999,8 @@ export class BattleScene extends Phaser.Scene {
       b.mesh.position.x += b.vx * dt;
       b.mesh.position.y += b.vy * dt;
       b.mesh.position.z += b.vz * dt;
-      // Gravity for snowman snowballs
-      if (b.owner === 9999) b.vy -= 9.8 * dt;
+      // Gravity for snowman snowballs (and any other arc projectiles) — very gentle drop
+      if (b.owner === 9999) b.vy -= 1.8 * dt;
       b.life -= dt;
 
       let hit = false;
@@ -8454,7 +9033,7 @@ export class BattleScene extends Phaser.Scene {
           const dz = b.mesh.position.z - npc.mesh.position.z;
           const dist = Math.sqrt(dx * dx + dz * dz);
           if (dist < 1.0) {
-            npc.hp -= 1;
+            npc.hp -= 1; // each bullet always chips off 1 — guns kill faster by firing more
             this.playSfx('hit', 0.3);
             hit = true;
             if (npc.hp <= 0) {
@@ -8462,6 +9041,51 @@ export class BattleScene extends Phaser.Scene {
               this.coinsEarned += 1000;
               this.showPickupMsg('+1000 coins!');
               this.spawnDeathFluff(npc.mesh.position.clone());
+            } else {
+              // Live NPC: refresh the floating health bar.
+              this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 8);
+            }
+            break;
+          }
+        }
+      }
+
+      // Check hit against rideable dinosaurs (T-Rexes etc.) — only player bullets damage them.
+      if (!hit && b.owner === -1) {
+        for (let ci = 0; ci < this.cars.length; ci++) {
+          const car = this.cars[ci];
+          if (car.dying || typeof car.hp !== 'number' || car.hp <= 0) continue;
+          // Use a tall hitbox so head + body shots both count.
+          const dx = b.mesh.position.x - car.mesh.position.x;
+          const dy = b.mesh.position.y - (car.mesh.position.y + 3);
+          const dz = b.mesh.position.z - car.mesh.position.z;
+          const d = Math.sqrt(dx * dx + dz * dz);
+          if (d < 3 && Math.abs(dy) < 5) {
+            car.hp -= b.damage;
+            this.playSfx('hit', 0.5);
+            hit = true;
+            if (car.healthCtx && car.healthTex && car.maxHp) {
+              this.updateHealthBar(car.healthCtx, car.healthTex, Math.max(0, car.hp), car.maxHp);
+            }
+            if (car.hp <= 0) {
+              car.dying = true;
+              this.coinsEarned += 2000;
+              this.showPickupMsg('+2000 coins! T-REX DOWN!');
+              if (car.healthBar) car.healthBar.visible = false;
+              // Stop the car moving and play the Death animation.
+              car.vx = 0; car.vz = 0; car.speed = 0; car.driver = 'none';
+              if (car.deathAction && car.mixer) {
+                if (car.roarAction) car.roarAction.stop();
+                car.mixer.stopAllAction();
+                car.deathAction.reset();
+                car.deathAction.play();
+              }
+              // Remove the corpse from the world after a short delay.
+              setTimeout(() => {
+                this.scene3d.remove(car.mesh);
+                const idx = this.cars.indexOf(car);
+                if (idx >= 0) this.cars.splice(idx, 1);
+              }, 5000);
             }
             break;
           }
@@ -8481,28 +9105,6 @@ export class BattleScene extends Phaser.Scene {
             // Tell the other player they got hit
             this.network.send({ type: 'PLAYER_HIT', targetId: pid, damage: b.damage });
             break;
-          }
-        }
-      }
-
-      // Check hit against bear boss
-      if (!hit && !this.bossDead && this.bossSpawned && this.boss) {
-        const bx = b.mesh.position.x - this.boss.position.x;
-        const by = b.mesh.position.y - (this.boss.position.y + 3);
-        const bz = b.mesh.position.z - this.boss.position.z;
-        const bdist = Math.sqrt(bx * bx + by * by + bz * bz);
-        if (bdist < 5) {
-          this.bossHP -= 10;
-          hit = true;
-          this.bossRoarTimer = 0.8; // trigger roar
-          this.playSfx('roar', 0.7);
-          if (this.bossHP <= 0) {
-            this.bossDead = true;
-            this.coinsEarned += 1000;
-            this.spawnDeathFluff(this.boss.position.clone(), 40);
-            this.scene3d.remove(this.boss);
-            this.playSfx('bossDeath', 0.8);
-            setTimeout(() => this.showVictory(), 1500);
           }
         }
       }
@@ -8624,47 +9226,7 @@ export class BattleScene extends Phaser.Scene {
     // Update player model position and facing — follow terrain or climb tower
     let terrainY = this.getTerrainHeight(this.playerPos.x, this.playerPos.z);
 
-    // Eiffel Tower climbing — walk along legs + snap to platforms
-    const towerScale = 0.5;
-    const towerBaseSpread = 15 * towerScale;
-    const distFromCenter = Math.sqrt(this.playerPos.x ** 2 + this.playerPos.z ** 2);
-
-    // Platform definitions (height, walkable radius) — scaled
-    const platforms = [
-      { y: 25 * towerScale, r: 10 * towerScale },  // First floor — wide walkable area
-      { y: 48 * towerScale, r: 7 * towerScale },   // Second floor
-      { y: 68 * towerScale, r: 4 * towerScale },   // Top platform
-    ];
-
-    if (distFromCenter < towerBaseSpread + 2) {
-      const maxClimbH = 68 * towerScale;
-      const ratio = Math.max(0.001, distFromCenter / (15 * towerScale));
-
-      // Calculate leg height at this distance
-      let legY = terrainY;
-      if (ratio < 1) {
-        const t = Math.min(1, -Math.log(ratio) / 2.8);
-        legY = t * maxClimbH;
-      }
-
-      // Check platforms from highest to lowest — snap if within radius
-      // The player stays on a platform as long as they're within its radius
-      // and their climbing height has reached it
-      let onPlatform = false;
-      for (let pi = platforms.length - 1; pi >= 0; pi--) {
-        const plat = platforms[pi];
-        if (distFromCenter < plat.r && legY >= plat.y - 2) {
-          terrainY = Math.max(terrainY, plat.y);
-          onPlatform = true;
-          break;
-        }
-      }
-
-      // If not on platform, follow the leg curve (climbing)
-      if (!onPlatform && legY > terrainY && legY < maxClimbH + 5) {
-        terrainY = Math.max(terrainY, legY);
-      }
-    }
+    // Eiffel Tower climbing disabled — player walks past it like any other obstacle.
 
     // Jump physics
     if (this.playerJumpY > 0 || this.playerVy !== 0) {
@@ -8766,6 +9328,8 @@ export class BattleScene extends Phaser.Scene {
     }
 
     const onTRex = this.playerInCar >= 0;
+    // Vehicles (quads, dirt bikes) keep the normal close camera; only big creatures zoom out.
+    const onVehicle = onTRex && !!this.cars[this.playerInCar]?.isVehicle;
 
     if (this.introCamera) {
       // Front-facing camera — shows your character's face
@@ -8803,10 +9367,11 @@ export class BattleScene extends Phaser.Scene {
       );
       this.camera.lookAt(lookTarget);
     } else {
-      // Normal behind camera (third person)
-      const camDist = onTRex ? 25 : 5;
-      const camHeight = onTRex ? 16 : 2.5;
-      const camOffsetX = onTRex ? 2 : 1;
+      // Normal behind camera (third person). Quads/bikes use the close foot-level camera.
+      const bigRide = onTRex && !onVehicle;
+      const camDist = bigRide ? 25 : 5;
+      const camHeight = bigRide ? 16 : 2.5;
+      const camOffsetX = bigRide ? 2 : 1;
 
       const behindX = this.playerPos.x + Math.sin(this.lookAngle) * camDist + Math.cos(this.lookAngle) * camOffsetX;
       const behindZ = this.playerPos.z + Math.cos(this.lookAngle) * camDist - Math.sin(this.lookAngle) * camOffsetX;
@@ -8827,10 +9392,19 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private updateNPCs(dt: number): void {
+    // Performance: skip AI + animation for NPCs far from the player (you can't see them act anyway).
+    // Saves the O(N²) target search and per-bone animation when there are ~50 NPCs spread around.
+    const cullSqr = 220 * 220;
     for (const npc of this.npcs) {
       if (npc.dead) continue;
+      const dxToP = npc.mesh.position.x - this.playerPos.x;
+      const dzToP = npc.mesh.position.z - this.playerPos.z;
+      if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue; // skip distant NPCs entirely
 
       const npcIdx = this.npcs.indexOf(npc);
+      // If this NPC is currently driving a car/T-Rex, the car loop already moves them
+      // and sets their riding pose — skip walking AI/animation here so it isn't overridden.
+      if (this.cars.some(c => c.driver === npcIdx)) continue;
       const aggroRange = 30;
       const shootRange = 18;
 
@@ -9264,91 +9838,199 @@ export class BattleScene extends Phaser.Scene {
       return buf;
     };
 
-    // Gunshot — sharp crack with decay
-    this.sfx.shoot = make(0.3, (_i, t) => {
-      const crack = Math.random() * 2 - 1;
-      const boom = Math.sin(t * 400) * Math.exp(-t * 20);
-      const snap = Math.sin(t * 2000) * Math.exp(-t * 60);
-      return (crack * 0.3 + boom * 0.5 + snap * 0.4) * Math.exp(-t * 8);
+    // Helpers for richer synthesis.
+    // Pink-ish noise: smoother than pure white noise, like real recorded crackle.
+    let pinkB0 = 0, pinkB1 = 0, pinkB2 = 0;
+    const pink = () => {
+      const w = Math.random() * 2 - 1;
+      pinkB0 = 0.997 * pinkB0 + w * 0.029591;
+      pinkB1 = 0.985 * pinkB1 + w * 0.032534;
+      pinkB2 = 0.95 * pinkB2 + w * 0.048056;
+      return pinkB0 + pinkB1 + pinkB2 + w * 0.18;
+    };
+    // Simple one-pole low-pass filter for thickening.
+    const lpFilter = (samples: number[], cutoff: number) => {
+      const a = 1 - Math.exp(-2 * Math.PI * cutoff / sr);
+      let y = 0;
+      for (let i = 0; i < samples.length; i++) { y += a * (samples[i] - y); samples[i] = y; }
+    };
+
+    // Build a sound from a per-sample function, then optionally low-pass it.
+    const makeFiltered = (dur: number, fn: (i: number, t: number) => number, lp?: number) => {
+      const len = Math.floor(sr * dur);
+      const buf = this.audioCtx.createBuffer(1, len, sr);
+      const arr: number[] = new Array(len);
+      for (let i = 0; i < len; i++) arr[i] = fn(i, i / sr);
+      if (lp) lpFilter(arr, lp);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.max(-1, Math.min(1, arr[i]));
+      return buf;
+    };
+
+    // Gunshot — short crack + low boom body + high-freq snap, low-passed for body.
+    this.sfx.shoot = makeFiltered(0.4, (_i, t) => {
+      const crack = pink() * Math.exp(-t * 35) * 1.6;          // explosive transient
+      const boomFreq = 90 * Math.exp(-t * 8) + 50;
+      const boom = Math.sin(2 * Math.PI * boomFreq * t) * Math.exp(-t * 9) * 0.9;
+      const tailSnap = pink() * Math.exp(-t * 6) * 0.18;       // pop tail
+      const echo = Math.sin(2 * Math.PI * 220 * (t - 0.06)) * (t > 0.06 ? Math.exp(-(t - 0.06) * 10) : 0) * 0.25;
+      return crack + boom + tailSnap + echo;
+    }, 6500);
+
+    // Bullet impact — short body thud, mid frequency.
+    this.sfx.hit = makeFiltered(0.2, (_i, t) => {
+      const thud = Math.sin(2 * Math.PI * (220 + 80 * Math.exp(-t * 30)) * t) * Math.exp(-t * 22);
+      const slap = pink() * Math.exp(-t * 60) * 0.7;
+      return thud * 0.7 + slap * 0.5;
+    }, 3500);
+
+    // Footstep — soft crunch with brief mid-low body.
+    this.sfx.step = makeFiltered(0.13, (_i, t) => {
+      const crunch = pink() * Math.exp(-t * 45);
+      const body = Math.sin(2 * Math.PI * 110 * t) * Math.exp(-t * 30) * 0.4;
+      return crunch * 0.7 + body;
+    }, 2500);
+
+    // Car engine — like a small idling 4-stroke with throttle wobble.
+    this.sfx.engine = makeFiltered(0.6, (_i, t) => {
+      const f = 70 + Math.sin(t * 2.5) * 5;
+      const fundamental = Math.sin(2 * Math.PI * f * t) * 0.55;
+      const harm2 = Math.sin(2 * Math.PI * f * 2 * t) * 0.25;
+      const harm3 = Math.sin(2 * Math.PI * f * 3.1 * t) * 0.12;
+      const noise = pink() * 0.18;
+      return fundamental + harm2 + harm3 + noise;
+    }, 1800);
+
+    // Car/quad hit — heavy crunch with metal ring.
+    this.sfx.carHit = makeFiltered(0.5, (_i, t) => {
+      const impact = Math.sin(2 * Math.PI * 130 * t) * Math.exp(-t * 11) * 0.9;
+      const crunch = pink() * Math.exp(-t * 13) * 1.0;
+      const metal = (Math.sin(2 * Math.PI * 1100 * t) + Math.sin(2 * Math.PI * 1850 * t) * 0.6) * Math.exp(-t * 18) * 0.45;
+      return impact * 0.6 + crunch * 0.6 + metal;
+    }, 5000);
+
+    // Bear roar — gravelly low growl with breath rumble. Slow swell, then decay.
+    this.sfx.roar = makeFiltered(0.9, (_i, t) => {
+      const swell = Math.min(t * 12, 1) * (t < 0.7 ? 1 : Math.exp(-(t - 0.7) * 8));
+      // Detuned low fundamentals create a beating "growl".
+      const f = 70 + Math.sin(t * 11) * 6;
+      const v1 = Math.sin(2 * Math.PI * f * t);
+      const v2 = Math.sin(2 * Math.PI * (f * 1.5) * t) * 0.6;
+      const v3 = Math.sin(2 * Math.PI * (f * 2.07) * t) * 0.35;
+      const breath = pink() * 0.4;
+      return (v1 + v2 + v3 + breath) * swell * 0.9;
+    }, 1600);
+
+    // Water splash — burst of bright noise then bubbly tail.
+    this.sfx.splash = makeFiltered(0.55, (_i, t) => {
+      const splash = pink() * Math.exp(-t * 7) * 1.5;
+      const bubble = Math.sin(2 * Math.PI * (700 + Math.sin(t * 50) * 250) * t) * Math.exp(-t * 8) * 0.35;
+      return splash * 0.8 + bubble;
+    }, 5500);
+
+    // Pickup — happy two-note chime with quick decay.
+    this.sfx.pickup = makeFiltered(0.32, (_i, t) => {
+      const note1 = Math.sin(2 * Math.PI * 880 * t) * (t < 0.12 ? 1 : 0);
+      const note2 = Math.sin(2 * Math.PI * 1320 * t) * (t >= 0.08 ? Math.exp(-(t - 0.08) * 6) : 0);
+      return (note1 * 0.4 + note2 * 0.5) * Math.exp(-t * 4);
     });
 
-    // Bullet hit — thud
-    this.sfx.hit = make(0.15, (_i, t) => {
-      return (Math.random() * 0.4 + Math.sin(t * 300) * 0.6) * Math.exp(-t * 25);
-    });
+    // Player hurt — pained "oof" with vibrato.
+    this.sfx.hurt = makeFiltered(0.28, (_i, t) => {
+      const fmFreq = 190 + Math.sin(t * 22) * 30;
+      const tone = Math.sin(2 * Math.PI * fmFreq * t) * Math.exp(-t * 10) * 0.7;
+      const grit = pink() * Math.exp(-t * 18) * 0.25;
+      return tone + grit;
+    }, 2200);
 
-    // Footstep — crunchy step
-    this.sfx.step = make(0.1, (_i, t) => {
-      return (Math.random() * 0.6 + Math.sin(t * 150) * 0.3) * Math.exp(-t * 30);
-    });
+    // Drowning — gurgly bubbles.
+    this.sfx.drown = makeFiltered(0.7, (_i, t) => {
+      const gurgleFreq = 320 + Math.sin(t * 12) * 70 + Math.sin(t * 4) * 25;
+      const tone = Math.sin(2 * Math.PI * gurgleFreq * t) * 0.5;
+      const bubbles = pink() * (0.5 + Math.sin(t * 9) * 0.5) * 0.4;
+      return (tone + bubbles) * Math.exp(-t * 2.5);
+    }, 4000);
 
-    // Car engine — low rumble loop
-    this.sfx.engine = make(0.5, (_i, t) => {
-      return (Math.sin(t * 80) * 0.4 + Math.sin(t * 160) * 0.2 + Math.random() * 0.15) *
-        (0.5 + Math.sin(t * 8) * 0.3);
-    });
+    // Boss death — massive explosion with shockwave + debris.
+    this.sfx.bossDeath = makeFiltered(1.2, (_i, t) => {
+      const env = Math.min(t * 30, 1);
+      const boom = Math.sin(2 * Math.PI * (50 + 30 * Math.exp(-t * 4)) * t) * Math.exp(-t * 3.2) * 1.3;
+      const blast = pink() * Math.exp(-t * 2.5) * 1.1;
+      const debris = pink() * Math.exp(-Math.max(0, t - 0.3) * 4) * (t > 0.3 ? 0.6 : 0);
+      const ring = Math.sin(2 * Math.PI * 240 * t) * Math.exp(-t * 4.5) * 0.35;
+      return env * (boom * 0.65 + blast * 0.55 + debris * 0.5 + ring);
+    }, 3500);
 
-    // Car hit — heavy impact
-    this.sfx.carHit = make(0.4, (_i, t) => {
-      const impact = Math.sin(t * 200) * Math.exp(-t * 12);
-      const crunch = Math.random() * Math.exp(-t * 8);
-      const metal = Math.sin(t * 800) * Math.exp(-t * 20);
-      return impact * 0.5 + crunch * 0.4 + metal * 0.3;
-    });
+    // Win fanfare — major triad ascending with fast attack/decay.
+    this.sfx.win = makeFiltered(1.2, (_i, t) => {
+      const env = Math.min(t * 20, 1) * Math.exp(-Math.max(0, t - 1.0) * 6);
+      const stage = Math.floor(t / 0.22);
+      const noteFreqs = [523.25, 659.25, 783.99, 1046.5];   // C5 E5 G5 C6
+      const f = noteFreqs[Math.min(stage, 3)];
+      const phase = t - stage * 0.22;
+      const tone = (Math.sin(2 * Math.PI * f * t) + Math.sin(2 * Math.PI * f * 2 * t) * 0.3) * Math.exp(-phase * 3);
+      return tone * 0.45 * env;
+    }, 7000);
 
-    // Bear roar — deep growl with harmonics
-    this.sfx.roar = make(0.8, (_i, t) => {
-      const growl = Math.sin(t * 120) * 0.5 + Math.sin(t * 180) * 0.3 + Math.sin(t * 60) * 0.4;
-      const rumble = Math.random() * 0.2;
-      const env = Math.sin(t * Math.PI / 0.8) * Math.min(t * 10, 1);
-      return (growl + rumble) * env;
-    });
+    // Swim — gentle water swoosh.
+    this.sfx.swim = makeFiltered(0.4, (_i, t) => {
+      const swoosh = pink() * Math.exp(-t * 5) * (0.5 + Math.sin(t * 6) * 0.4);
+      const tone = Math.sin(2 * Math.PI * (260 + Math.sin(t * 9) * 30) * t) * Math.exp(-t * 4) * 0.18;
+      return swoosh + tone;
+    }, 3000);
 
-    // Water splash
-    this.sfx.splash = make(0.5, (_i, t) => {
-      const splash = Math.random() * Math.exp(-t * 6);
-      const bubble = Math.sin(t * 600 * Math.exp(-t * 3)) * Math.exp(-t * 8) * 0.3;
-      return splash * 0.7 + bubble;
-    });
+    // Evil laugh — 4 "HA HA HA HA" bursts at descending pitch, with growl harmonics.
+    // Each "HA" is a quick vowel attack with vibrato, separated by short gaps.
+    this.sfx.evilLaugh = makeFiltered(1.2, (_i, t) => {
+      const burstDur = 0.18;
+      const gap = 0.08;
+      const cycle = burstDur + gap;
+      const burstIdx = Math.floor(t / cycle);
+      const burstT = t - burstIdx * cycle;
+      if (burstIdx >= 4 || burstT > burstDur) return 0;
+      // Pitch descends with each burst (evil deepening). Open "AH" formant ~700Hz, second formant ~1100Hz.
+      const pitch = 220 - burstIdx * 18;
+      const env = Math.sin(Math.PI * burstT / burstDur); // bell-shaped
+      const vibrato = Math.sin(2 * Math.PI * 24 * t) * 8;
+      const fund = Math.sin(2 * Math.PI * (pitch + vibrato) * t);
+      const harm2 = Math.sin(2 * Math.PI * (pitch + vibrato) * 2 * t) * 0.4;
+      const harm3 = Math.sin(2 * Math.PI * (pitch + vibrato) * 3 * t) * 0.25;
+      // Vowel formants — peaks around 700 and 1100 Hz
+      const f1 = Math.sin(2 * Math.PI * 700 * t) * 0.18;
+      const f2 = Math.sin(2 * Math.PI * 1100 * t) * 0.12;
+      const breath = pink() * 0.18;
+      return (fund + harm2 + harm3 + f1 + f2 + breath) * env * 0.7;
+    }, 2200);
 
-    // Pickup ding
-    this.sfx.pickup = make(0.3, (_i, t) => {
-      return (Math.sin(t * 880) * 0.4 + Math.sin(t * 1320) * 0.3) * Math.exp(-t * 6);
-    });
+    // Asynchronously load REAL recorded audio files from public/sounds and replace the synth versions.
+    // Anything that fails to load just keeps using the synthesized fallback above.
+    this.loadRealSfx();
+  }
 
-    // Player hurt
-    this.sfx.hurt = make(0.25, (_i, t) => {
-      return (Math.sin(t * 250 + Math.sin(t * 40) * 3) * 0.5 + Math.random() * 0.2) * Math.exp(-t * 10);
-    });
-
-    // Drown — gurgling
-    this.sfx.drown = make(0.6, (_i, t) => {
-      const gurgle = Math.sin(t * 300 + Math.sin(t * 15) * 8) * 0.4;
-      const bubbles = Math.sin(t * 800 * (1 + Math.sin(t * 5))) * Math.random() * 0.3;
-      return (gurgle + bubbles) * Math.exp(-t * 3);
-    });
-
-    // Boss death — big explosion
-    this.sfx.bossDeath = make(1.0, (_i, t) => {
-      const boom = Math.sin(t * 60) * Math.exp(-t * 3);
-      const crack = Math.random() * Math.exp(-t * 2);
-      const ring = Math.sin(t * 400) * Math.exp(-t * 5) * 0.3;
-      return (boom * 0.6 + crack * 0.4 + ring) * Math.min(t * 20, 1);
-    });
-
-    // Win fanfare
-    this.sfx.win = make(1.0, (_i, t) => {
-      const n1 = Math.sin(t * 523) * (t < 0.25 ? 1 : 0);
-      const n2 = Math.sin(t * 659) * (t >= 0.25 && t < 0.5 ? 1 : 0);
-      const n3 = Math.sin(t * 784) * (t >= 0.5 && t < 0.75 ? 1 : 0);
-      const n4 = Math.sin(t * 1047) * (t >= 0.75 ? 1 : 0);
-      return (n1 + n2 + n3 + n4) * 0.4 * Math.exp(-(t % 0.25) * 4);
-    });
-
-    // Swim — water swoosh
-    this.sfx.swim = make(0.3, (_i, t) => {
-      return (Math.random() * 0.3 + Math.sin(t * 200 + Math.sin(t * 8) * 5) * 0.2) * Math.exp(-t * 5);
-    });
+  private async loadRealSfx(): Promise<void> {
+    const base = (import.meta.env?.BASE_URL ?? '/') + 'sounds/';
+    const files: Record<string, string> = {
+      shoot: 'shoot.wav',
+      hit: 'hit.wav',
+      step: 'step.mp3',
+      carHit: 'carHit.wav',
+      pickup: 'pickup.wav',
+      hurt: 'hurt.wav',
+      bossDeath: 'bossDeath.wav',
+      win: 'win.mp3',
+      splash: 'splash.wav',
+      evilLaugh: 'evilLaugh.mp3',
+      roar: 'roar.mp3',
+    };
+    await Promise.all(Object.entries(files).map(async ([key, file]) => {
+      try {
+        const res = await fetch(base + file);
+        if (!res.ok) return;
+        const data = await res.arrayBuffer();
+        const buffer = await this.audioCtx.decodeAudioData(data);
+        this.sfx[key] = buffer;
+      } catch { /* keep synth fallback */ }
+    }));
   }
 
   /** Spawn black fluff particles at position that travel to map center (0,0,0) and vanish */
@@ -9507,6 +10189,10 @@ export class BattleScene extends Phaser.Scene {
     for (const k in this.fpGuns) {
       this.fpGuns[k].visible = (k === activeKey);
     }
+    // Show the 3rd-person AR rifle on the player when they have an AR-class gun equipped.
+    if (this.pThirdGun) {
+      this.pThirdGun.visible = activeKey === 'ar';
+    }
   }
 
   private playSfx(name: string, volume = 0.5): void {
@@ -9536,7 +10222,26 @@ export class BattleScene extends Phaser.Scene {
         this.playerGun = gun.name;
         this.gunText.textContent = 'Gun: ' + gun.name;
         this.gunText.style.color = '#' + gun.color.toString(16).padStart(6, '0');
+        // Starting ammo when you pick up a gun (melee weapons get nothing — they don't use bullets)
+        const wep = Object.values(WEAPONS).find(w => w.name === gun.name);
+        if (wep && wep.type !== 'melee') this.playerAmmo = Math.max(this.playerAmmo, 120);
+        this.updateAmmoText();
         this.showPickupMsg('Picked up ' + gun.name + '!');
+        this.playSfx('pickup', 0.5);
+      }
+    }
+
+    // Bullet boxes
+    for (const a of this.ammoPickups) {
+      if (a.picked) continue;
+      const dx = a.group.position.x - px;
+      const dz = a.group.position.z - pz;
+      if (dx * dx + dz * dz < pickRange * pickRange) {
+        a.picked = true;
+        this.scene3d.remove(a.group);
+        this.playerAmmo += 80;
+        this.updateAmmoText();
+        this.showPickupMsg('+80 bullets!');
         this.playSfx('pickup', 0.5);
       }
     }
@@ -9554,7 +10259,7 @@ export class BattleScene extends Phaser.Scene {
         if (this.playerHP >= this.playerMaxHP * 0.75) this.hpText.style.color = '#44ff44';
         else if (this.playerHP >= this.playerMaxHP * 0.4) this.hpText.style.color = '#ffcc00';
         else this.hpText.style.color = '#ff4444';
-        this.showPickupMsg('+25 HP from pizza!');
+        this.showPickupMsg(`+25 HP from ${ch.name === 'cookie' ? 'cookie' : 'pizza'}!`);
         this.playSfx('pickup', 0.5);
       }
     }
@@ -9579,10 +10284,13 @@ export class BattleScene extends Phaser.Scene {
       <div id="hud-gun" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 28px)':'48px'};left:15px;color:#ffcc00;font:bold ${mob?16:20}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none">
         Gun: None
       </div>
-      <div id="hud-alive" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 52px)':'76px'};left:15px;color:#ff8844;font:bold ${mob?16:20}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none">
+      <div id="hud-ammo" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 52px)':'76px'};left:15px;color:#ffeebb;font:bold ${mob?14:18}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none">
+        Bullets: 0
+      </div>
+      <div id="hud-alive" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 76px)':'104px'};left:15px;color:#ff8844;font:bold ${mob?16:20}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none">
         Alive: 20
       </div>
-      <div id="hud-world" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 76px)':'104px'};left:15px;color:#88ccff;font:bold ${mob?14:18}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none;cursor:pointer;pointer-events:auto">
+      <div id="hud-world" style="position:absolute;top:${mob?'calc(env(safe-area-inset-top, 10px) + 100px)':'132px'};left:15px;color:#88ccff;font:bold ${mob?14:18}px Arial;text-shadow:2px 2px 4px black;-webkit-user-select:none;cursor:pointer;pointer-events:auto">
         ${BattleScene.worldNames[this.currentWorld % 4]} World
       </div>
       <div id="hud-pickup" style="position:absolute;top:35%;left:50%;transform:translate(-50%,0);color:#ffffff;font:bold ${mob?20:22}px Arial;text-shadow:2px 2px 6px black;opacity:0;transition:opacity 0.3s;-webkit-user-select:none">
@@ -9593,7 +10301,9 @@ export class BattleScene extends Phaser.Scene {
     this.hudDiv = hud;
     this.hpText = document.getElementById('hud-hp') as HTMLDivElement;
     this.gunText = document.getElementById('hud-gun') as HTMLDivElement;
+    this.ammoText = document.getElementById('hud-ammo') as HTMLDivElement;
     this.aliveText = document.getElementById('hud-alive') as HTMLDivElement;
+    this.updateAmmoText();
     this.pickupMsg = document.getElementById('hud-pickup') as HTMLDivElement;
     const pauseBtn = document.getElementById('hud-pause')!;
     pauseBtn.addEventListener('click', (e) => {

@@ -200,18 +200,27 @@ export class DrawOnSkinScene extends Phaser.Scene {
       if (idx >= 0 && idx < CHAR_VISUALS.length) vis = CHAR_VISUALS[idx];
     }
 
+    const isShort = window.innerHeight < 500;
+    // Reserve 48px at the top for the BACK/DONE buttons so everything else fits under them.
+    const phoneTopPad = 48;
+    const phoneBotPad = 4;
+    const availH = `calc(100vh - ${phoneTopPad + phoneBotPad}px)`;
+
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.92);';
+    overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.92);overflow:hidden;${isShort ? `padding:${phoneTopPad}px 4px ${phoneBotPad}px;box-sizing:border-box;` : ''}`;
 
     const container = document.createElement('div');
-    container.style.cssText = 'display:flex;gap:12px;align-items:center;padding:8px;';
+    container.style.cssText = `display:flex;gap:${isShort ? 4 : 12}px;align-items:center;padding:${isShort ? 2 : 8}px;max-width:100%;max-height:100%;box-sizing:border-box;`;
 
     // === 3D CANVAS ===
     const canvas3d = document.createElement('canvas');
     const SIZE = 512;
     canvas3d.width = SIZE;
     canvas3d.height = SIZE;
-    canvas3d.style.cssText = 'width:55vmin;height:55vmin;border:2px solid #44aaff;border-radius:4px;cursor:crosshair;touch-action:none;';
+    // On phones, cap canvas to the content area so it can never push other things off-screen.
+    // Side panels (128 + 88) + gaps (12) = 228 reserved, so canvas width <= 100vw - 228.
+    const canvasCssSize = isShort ? '80px' : '55vmin';
+    canvas3d.style.cssText = `width:${canvasCssSize};height:${canvasCssSize};border:2px solid #44aaff;border-radius:4px;cursor:crosshair;touch-action:none;flex-shrink:0;`;
 
     // Three.js setup
     const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
@@ -222,9 +231,9 @@ export class DrawOnSkinScene extends Phaser.Scene {
     const scene = new THREE.Scene();
     this.scene3d = scene;
 
-    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
-    camera.position.set(0, 1.0, 4.5);
-    camera.lookAt(0, 0.9, 0);
+    const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 50);
+    camera.position.set(0, 1.0, 5.2);
+    camera.lookAt(0, 1.0, 0);
     this.camera3d = camera;
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
@@ -505,17 +514,19 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     // === CONTROLS ===
     const controls = document.createElement('div');
-    controls.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-width:160px;';
+    controls.style.cssText = `display:flex;flex-direction:column;gap:${isShort ? 2 : 6}px;${isShort ? `width:128px;flex-shrink:0;max-height:${availH};overflow-y:auto;-webkit-overflow-scrolling:touch;` : 'max-width:160px;'}`;
 
-    const title = document.createElement('div');
-    title.textContent = 'PAINT ON SKIN';
-    title.style.cssText = 'color:#44aaff;font:bold 14px "Arial Black";text-align:center;';
-    controls.appendChild(title);
+    if (!isShort) {
+      const title = document.createElement('div');
+      title.textContent = 'PAINT ON SKIN';
+      title.style.cssText = 'color:#44aaff;font:bold 14px "Arial Black";text-align:center;';
+      controls.appendChild(title);
 
-    const hint = document.createElement('div');
-    hint.textContent = 'Tap character to paint. Drag empty space to rotate.';
-    hint.style.cssText = 'color:#888;font:10px Arial;text-align:center;';
-    controls.appendChild(hint);
+      const hint = document.createElement('div');
+      hint.textContent = 'Tap character to paint. Drag empty space to rotate.';
+      hint.style.cssText = 'color:#888;font:10px Arial;text-align:center;';
+      controls.appendChild(hint);
+    }
 
     // Colors
     const colors = [
@@ -527,11 +538,12 @@ export class DrawOnSkinScene extends Phaser.Scene {
     ];
 
     const colorGrid = document.createElement('div');
-    colorGrid.style.cssText = 'display:grid;grid-template-columns:repeat(5,1fr);gap:2px;';
+    colorGrid.style.cssText = `display:grid;grid-template-columns:repeat(5,1fr);gap:${isShort ? 1 : 2}px;`;
     const swatches: HTMLDivElement[] = [];
+    const swatchSize = isShort ? 14 : 24;
     for (const c of colors) {
       const swatch = document.createElement('div');
-      swatch.style.cssText = `width:24px;height:24px;background:${c};border:2px solid #333;border-radius:2px;cursor:pointer;`;
+      swatch.style.cssText = `width:${swatchSize}px;height:${swatchSize}px;background:${c};border:${isShort ? 1 : 2}px solid #333;border-radius:2px;cursor:pointer;`;
       swatch.addEventListener('click', () => {
         this.currentColor = c;
         this.isEraser = false;
@@ -557,7 +569,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
     // Brush size
     const sizeLabel = document.createElement('div');
     sizeLabel.textContent = 'Brush: 1';
-    sizeLabel.style.cssText = 'color:#fff;font:bold 11px Arial;text-align:center;';
+    sizeLabel.style.cssText = `color:#fff;font:bold ${isShort ? 9 : 11}px Arial;text-align:center;`;
     controls.appendChild(sizeLabel);
 
     const sizeSlider = document.createElement('input');
@@ -565,7 +577,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
     sizeSlider.min = '1';
     sizeSlider.max = '8';
     sizeSlider.value = '1';
-    sizeSlider.style.cssText = 'width:100%;';
+    sizeSlider.style.cssText = `width:100%;${isShort ? 'height:12px;margin:0;' : ''}`;
     sizeSlider.addEventListener('input', () => {
       this.brushSize = parseInt(sizeSlider.value, 10);
       sizeLabel.textContent = `Brush: ${sizeSlider.value}`;
@@ -579,7 +591,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     const eraserBtn = document.createElement('button');
     eraserBtn.textContent = 'ERASER';
-    eraserBtn.style.cssText = 'padding:6px;font:bold 11px Arial;background:#555;color:#fff;border:none;border-radius:4px;cursor:pointer;';
+    eraserBtn.style.cssText = `padding:${isShort ? 3 : 6}px;font:bold ${isShort ? 9 : 11}px Arial;background:#555;color:#fff;border:none;border-radius:4px;cursor:pointer;`;
     eraserBtn.addEventListener('click', () => {
       this.isEraser = true;
       swatches.forEach(d => d.style.borderColor = '#333');
@@ -590,7 +602,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     const clearBtn = document.createElement('button');
     clearBtn.textContent = 'CLEAR ALL';
-    clearBtn.style.cssText = 'padding:6px;font:bold 11px Arial;background:#aa2222;color:#fff;border:none;border-radius:4px;cursor:pointer;';
+    clearBtn.style.cssText = `padding:${isShort ? 3 : 6}px;font:bold ${isShort ? 9 : 11}px Arial;background:#aa2222;color:#fff;border:none;border-radius:4px;cursor:pointer;`;
     clearBtn.addEventListener('click', () => {
       for (const [, info] of paintableTextures) {
         // Reset to base — re-fill with original material color
@@ -608,10 +620,12 @@ export class DrawOnSkinScene extends Phaser.Scene {
     this.gpClearAll = () => { clearBtn.click(); };
 
     // Skin name input
-    const nameLabel = document.createElement('div');
-    nameLabel.textContent = 'Skin Name:';
-    nameLabel.style.cssText = 'color:#aaa;font:bold 10px Arial;';
-    controls.appendChild(nameLabel);
+    if (!isShort) {
+      const nameLabel = document.createElement('div');
+      nameLabel.textContent = 'Skin Name:';
+      nameLabel.style.cssText = 'color:#aaa;font:bold 10px Arial;';
+      controls.appendChild(nameLabel);
+    }
 
     const skins = getSkinsList();
     const activeSkin = skins.find(s => s.id === currentSkinId);
@@ -620,7 +634,8 @@ export class DrawOnSkinScene extends Phaser.Scene {
     nameInput.type = 'text';
     nameInput.value = activeSkin?.name || 'My Skin';
     nameInput.maxLength = 20;
-    nameInput.style.cssText = 'width:100%;padding:6px;font:bold 12px Arial;background:#333;color:#fff;border:2px solid #555;border-radius:4px;box-sizing:border-box;';
+    nameInput.placeholder = 'Skin Name';
+    nameInput.style.cssText = `width:100%;padding:${isShort ? 3 : 6}px;font:bold ${isShort ? 10 : 12}px Arial;background:#333;color:#fff;border:${isShort ? 1 : 2}px solid #555;border-radius:4px;box-sizing:border-box;`;
     controls.appendChild(nameInput);
 
     const getCurrentPixelData = (): Record<string, (string | null)[][]> => {
@@ -656,17 +671,17 @@ export class DrawOnSkinScene extends Phaser.Scene {
 
     // Skins list panel
     const skinsPanel = document.createElement('div');
-    skinsPanel.style.cssText = 'display:flex;flex-direction:column;gap:4px;max-width:120px;max-height:55vmin;overflow-y:auto;padding:4px;';
+    skinsPanel.style.cssText = `display:flex;flex-direction:column;gap:${isShort ? 2 : 4}px;${isShort ? `width:88px;flex-shrink:0;max-height:${availH};overflow-y:auto;-webkit-overflow-scrolling:touch;` : 'max-width:120px;max-height:55vmin;overflow-y:auto;'}padding:${isShort ? 2 : 4}px;`;
 
     const skinsTitle = document.createElement('div');
     skinsTitle.textContent = 'MY SKINS';
-    skinsTitle.style.cssText = 'color:#44aaff;font:bold 11px "Arial Black";text-align:center;';
+    skinsTitle.style.cssText = `color:#44aaff;font:bold ${isShort ? 9 : 11}px "Arial Black";text-align:center;`;
     skinsPanel.appendChild(skinsTitle);
 
     // Coins display (created early so delete handlers can update it)
     const coinLabel = document.createElement('div');
     coinLabel.textContent = `${getCoins()} coins`;
-    coinLabel.style.cssText = 'color:#ffdd00;font:bold 11px Arial;text-align:center;';
+    coinLabel.style.cssText = `color:#ffdd00;font:bold ${isShort ? 9 : 11}px Arial;text-align:center;`;
 
     const renderSkinsList = () => {
       // Remove old entries (keep title)
@@ -675,17 +690,17 @@ export class DrawOnSkinScene extends Phaser.Scene {
       for (const skin of allSkins) {
         const entry = document.createElement('div');
         const isActive = skin.id === currentSkinId;
-        entry.style.cssText = `display:flex;flex-direction:column;align-items:center;padding:4px;border:2px solid ${isActive ? '#44ff88' : '#444'};border-radius:6px;cursor:pointer;background:${isActive ? 'rgba(34,85,51,0.5)' : 'rgba(34,34,68,0.5)'};`;
+        entry.style.cssText = `display:flex;flex-direction:column;align-items:center;padding:${isShort ? 2 : 4}px;border:${isShort ? 1 : 2}px solid ${isActive ? '#44ff88' : '#444'};border-radius:6px;cursor:pointer;background:${isActive ? 'rgba(34,85,51,0.5)' : 'rgba(34,34,68,0.5)'};`;
         // Thumbnail
         if (skin.thumb) {
           const img = document.createElement('img');
           img.src = skin.thumb;
-          img.style.cssText = 'width:50px;height:40px;object-fit:contain;border-radius:3px;';
+          img.style.cssText = `width:${isShort ? 36 : 50}px;height:${isShort ? 28 : 40}px;object-fit:contain;border-radius:3px;`;
           entry.appendChild(img);
         }
         const label = document.createElement('div');
         label.textContent = skin.name;
-        label.style.cssText = 'color:#fff;font:bold 9px Arial;text-align:center;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        label.style.cssText = `color:#fff;font:bold ${isShort ? 8 : 9}px Arial;text-align:center;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
         entry.appendChild(label);
         // Click to load this skin
         entry.addEventListener('click', () => {
@@ -709,9 +724,9 @@ export class DrawOnSkinScene extends Phaser.Scene {
         // Delete button — two-tap confirm, refunds 50 coins on delete
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
-        delBtn.textContent = 'DELETE +50';
-        const delBtnNormal = 'padding:4px 6px;margin-top:4px;font:bold 10px Arial;background:#aa2222;color:#fff;border:none;border-radius:4px;cursor:pointer;width:100%;';
-        const delBtnConfirm = 'padding:4px 6px;margin-top:4px;font:bold 10px Arial;background:#ffcc00;color:#000;border:none;border-radius:4px;cursor:pointer;width:100%;';
+        delBtn.textContent = isShort ? 'DEL +50' : 'DELETE +50';
+        const delBtnNormal = `padding:${isShort ? '2px 3px' : '4px 6px'};margin-top:${isShort ? 2 : 4}px;font:bold ${isShort ? 8 : 10}px Arial;background:#aa2222;color:#fff;border:none;border-radius:4px;cursor:pointer;width:100%;`;
+        const delBtnConfirm = `padding:${isShort ? '2px 3px' : '4px 6px'};margin-top:${isShort ? 2 : 4}px;font:bold ${isShort ? 8 : 10}px Arial;background:#ffcc00;color:#000;border:none;border-radius:4px;cursor:pointer;width:100%;`;
         delBtn.style.cssText = delBtnNormal;
         let armed = false;
         let armTimer: ReturnType<typeof setTimeout> | null = null;
@@ -723,12 +738,12 @@ export class DrawOnSkinScene extends Phaser.Scene {
           e.preventDefault();
           if (!armed) {
             armed = true;
-            delBtn.textContent = 'TAP AGAIN';
+            delBtn.textContent = isShort ? 'AGAIN?' : 'TAP AGAIN';
             delBtn.style.cssText = delBtnConfirm;
             if (armTimer) clearTimeout(armTimer);
             armTimer = setTimeout(() => {
               armed = false;
-              delBtn.textContent = 'DELETE +50';
+              delBtn.textContent = isShort ? 'DEL +50' : 'DELETE +50';
               delBtn.style.cssText = delBtnNormal;
             }, 2500);
             return;
@@ -755,8 +770,8 @@ export class DrawOnSkinScene extends Phaser.Scene {
       }
       // "NEW SKIN" button at bottom
       const newBtn = document.createElement('button');
-      newBtn.textContent = '+ NEW SKIN';
-      newBtn.style.cssText = 'padding:6px;font:bold 10px Arial;background:#4488ff;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:4px;';
+      newBtn.textContent = isShort ? '+ NEW' : '+ NEW SKIN';
+      newBtn.style.cssText = `padding:${isShort ? 3 : 6}px;font:bold ${isShort ? 9 : 10}px Arial;background:#4488ff;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:${isShort ? 2 : 4}px;`;
       newBtn.addEventListener('click', () => {
         // Save current first
         if (currentSkinId) {
@@ -789,8 +804,8 @@ export class DrawOnSkinScene extends Phaser.Scene {
     controls.appendChild(coinLabel);
 
     const saveBtn = document.createElement('button');
-    saveBtn.textContent = 'SAVE SKIN (50 coins)';
-    saveBtn.style.cssText = 'padding:8px;font:bold 12px Arial;background:#22aa44;color:#fff;border:none;border-radius:4px;cursor:pointer;';
+    saveBtn.textContent = isShort ? 'SAVE (50c)' : 'SAVE SKIN (50 coins)';
+    saveBtn.style.cssText = `padding:${isShort ? 4 : 8}px;font:bold ${isShort ? 10 : 12}px Arial;background:#22aa44;color:#fff;border:none;border-radius:4px;cursor:pointer;`;
     saveBtn.addEventListener('click', () => {
       // Check if this is an update to existing skin (free) or new save (costs 50)
       const allSkins = getSkinsList();
@@ -836,27 +851,29 @@ export class DrawOnSkinScene extends Phaser.Scene {
     // BIG obvious DELETE button for the currently-loaded skin (refunds 50 coins)
     const deleteCurrentBtn = document.createElement('button');
     deleteCurrentBtn.type = 'button';
-    const delNormalStyle = 'padding:10px;font:bold 13px "Arial Black";background:#cc2222;color:#fff;border:2px solid #ff6666;border-radius:6px;cursor:pointer;';
-    const delArmedStyle = 'padding:10px;font:bold 13px "Arial Black";background:#ffcc00;color:#000;border:2px solid #ff9900;border-radius:6px;cursor:pointer;';
-    deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+    const delNormalStyle = `padding:${isShort ? 4 : 10}px;font:bold ${isShort ? 10 : 13}px "Arial Black";background:#cc2222;color:#fff;border:${isShort ? 1 : 2}px solid #ff6666;border-radius:6px;cursor:pointer;`;
+    const delArmedStyle = `padding:${isShort ? 4 : 10}px;font:bold ${isShort ? 10 : 13}px "Arial Black";background:#ffcc00;color:#000;border:${isShort ? 1 : 2}px solid #ff9900;border-radius:6px;cursor:pointer;`;
+    deleteCurrentBtn.textContent = isShort ? 'DELETE (+50)' : 'DELETE SKIN (+50)';
     deleteCurrentBtn.style.cssText = delNormalStyle;
     let delArmed = false;
     let delTimer: ReturnType<typeof setTimeout> | null = null;
+    const delLabel = isShort ? 'DELETE (+50)' : 'DELETE SKIN (+50)';
+    const delArmedLabel = isShort ? 'TAP AGAIN' : 'TAP AGAIN TO DELETE';
     deleteCurrentBtn.addEventListener('click', () => {
       const allSkins = getSkinsList();
       if (!currentSkinId || !allSkins.some(s => s.id === currentSkinId)) {
-        deleteCurrentBtn.textContent = 'NOTHING TO DELETE';
-        setTimeout(() => { deleteCurrentBtn.textContent = 'DELETE SKIN (+50)'; }, 1200);
+        deleteCurrentBtn.textContent = 'NOTHING';
+        setTimeout(() => { deleteCurrentBtn.textContent = delLabel; }, 1200);
         return;
       }
       if (!delArmed) {
         delArmed = true;
-        deleteCurrentBtn.textContent = 'TAP AGAIN TO DELETE';
+        deleteCurrentBtn.textContent = delArmedLabel;
         deleteCurrentBtn.style.cssText = delArmedStyle;
         if (delTimer) clearTimeout(delTimer);
         delTimer = setTimeout(() => {
           delArmed = false;
-          deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+          deleteCurrentBtn.textContent = delLabel;
           deleteCurrentBtn.style.cssText = delNormalStyle;
         }, 2500);
         return;
@@ -876,7 +893,7 @@ export class DrawOnSkinScene extends Phaser.Scene {
       loadSkinData(currentSkinId ? (curSkins[0]?.data || null) : null);
       nameInput.value = curSkins[0]?.name || 'My Skin';
       renderSkinsList();
-      deleteCurrentBtn.textContent = 'DELETE SKIN (+50)';
+      deleteCurrentBtn.textContent = delLabel;
       deleteCurrentBtn.style.cssText = delNormalStyle;
     });
     controls.appendChild(deleteCurrentBtn);
@@ -884,28 +901,30 @@ export class DrawOnSkinScene extends Phaser.Scene {
     container.appendChild(controls);
     container.appendChild(skinsPanel);
 
-    // BACK button — top left corner, goes to shop
+    // BACK button — top left corner, goes to shop. Uses touchend too for reliable iPhone taps.
     const backBtn = document.createElement('button');
     backBtn.textContent = '← BACK';
-    backBtn.style.cssText = 'position:fixed;top:10px;left:10px;padding:10px 16px;font:bold 14px "Arial Black";background:#555;color:#fff;border:none;border-radius:6px;cursor:pointer;z-index:9999;';
-    backBtn.addEventListener('click', () => {
+    backBtn.style.cssText = 'position:fixed;top:10px;left:10px;padding:10px 16px;font:bold 14px "Arial Black";background:#555;color:#fff;border:none;border-radius:6px;cursor:pointer;z-index:10001;touch-action:manipulation;-webkit-tap-highlight-color:rgba(255,255,255,0.3);';
+    const doBack = () => {
       this.cleanup();
       this.scene.start('ShopHubScene');
-    });
-    overlay.appendChild(backBtn);
+    };
+    backBtn.addEventListener('click', doBack);
+    backBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); doBack(); }, { passive: false });
 
     // DONE button — top right corner, saves and goes to character select
     const doneBtn = document.createElement('button');
     doneBtn.textContent = 'DONE ✓';
-    doneBtn.style.cssText = 'position:fixed;top:10px;right:10px;padding:10px 16px;font:bold 14px "Arial Black";background:#22aa44;color:#fff;border:none;border-radius:6px;cursor:pointer;z-index:9999;';
-    doneBtn.addEventListener('click', () => {
+    doneBtn.style.cssText = 'position:fixed;top:10px;right:10px;padding:10px 16px;font:bold 14px "Arial Black";background:#22aa44;color:#fff;border:none;border-radius:6px;cursor:pointer;z-index:10001;touch-action:manipulation;-webkit-tap-highlight-color:rgba(255,255,255,0.3);';
+    const doDone = () => {
       saveBtn.click();
       setTimeout(() => {
         this.cleanup();
         this.scene.start('CharacterSelectScene');
       }, 200);
-    });
-    overlay.appendChild(doneBtn);
+    };
+    doneBtn.addEventListener('click', doDone);
+    doneBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); doDone(); }, { passive: false });
     overlay.appendChild(container);
     document.body.appendChild(overlay);
     this.overlayEl = overlay;

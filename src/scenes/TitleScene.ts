@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
 import { getCoins } from '../utils/coinStore';
 import { CHAR_VISUALS } from './BattleScene';
@@ -25,6 +27,53 @@ export class TitleScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Pre-load real biome photos (grass / sand / snow) so each panel can use the matching one.
+    // Once all 3 finish (or fail), render the panels.
+    const baseUrl = (import.meta.env?.BASE_URL ?? '/');
+    const files: { key: 'grass' | 'sand' | 'snow' | 'sand_normal' | 'snow_normal' | 'trex_skin'; src: string }[] = [
+      { key: 'grass',       src: baseUrl + 'textures/grass.jpg' },
+      { key: 'sand',        src: baseUrl + 'textures/sand.jpg' },
+      { key: 'snow',        src: baseUrl + 'textures/snow.jpg?v=2' },
+      { key: 'sand_normal', src: baseUrl + 'textures/sand_normal.jpg' },
+      { key: 'snow_normal', src: baseUrl + 'textures/snow_normal.jpg?v=2' },
+      { key: 'trex_skin',   src: baseUrl + 'textures/trex_skin.jpg' },
+    ];
+    // +1 for the T-Rex GLB model + 1 for the AR rifle GLB model
+    let pending = files.length + 2;
+    let rendered = false;
+    const done = () => {
+      if (rendered) return;
+      rendered = true;
+      this.renderAllPanels();
+    };
+    new GLTFLoader().load(baseUrl + 'models/trex.glb',
+      (gltf) => { this.trexModel = gltf.scene; if (--pending <= 0) done(); },
+      undefined,
+      () => { if (--pending <= 0) done(); },
+    );
+    new GLTFLoader().load(baseUrl + 'models/ar.glb',
+      (gltf) => { this.arModel = gltf.scene; if (--pending <= 0) done(); },
+      undefined,
+      () => { if (--pending <= 0) done(); },
+    );
+    for (const f of files) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        if (f.key === 'grass') this.grassImage = img;
+        else if (f.key === 'sand') this.sandImage = img;
+        else if (f.key === 'snow') this.snowImage = img;
+        else if (f.key === 'sand_normal') this.sandNormalImage = img;
+        else if (f.key === 'snow_normal') this.snowNormalImage = img;
+        else if (f.key === 'trex_skin') this.trexSkinImage = img;
+        if (--pending <= 0) done();
+      };
+      img.onerror = () => { if (--pending <= 0) done(); };
+      img.src = f.src;
+    }
+  }
+
+  private renderAllPanels(): void {
     const panelW = Math.floor(GAME_WIDTH / 4);
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 
@@ -199,6 +248,15 @@ export class TitleScene extends Phaser.Scene {
   }
 
 
+  private grassImage: HTMLImageElement | null = null;
+  private sandImage: HTMLImageElement | null = null;
+  private snowImage: HTMLImageElement | null = null;
+  private sandNormalImage: HTMLImageElement | null = null;
+  private snowNormalImage: HTMLImageElement | null = null;
+  private trexSkinImage: HTMLImageElement | null = null;
+  private trexModel: THREE.Group | null = null;
+  private arModel: THREE.Group | null = null;
+
   private renderWorldPanel(
     renderer: THREE.WebGLRenderer,
     w: number, h: number,
@@ -246,19 +304,83 @@ export class TitleScene extends Phaser.Scene {
       for (let i = 0; i < 20; i++) { gCtx.globalAlpha = 0.3 + Math.random() * 0.4; gCtx.fillStyle = '#8a7050'; gCtx.beginPath(); gCtx.ellipse(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 4, 1 + Math.random() * 3, Math.random() * Math.PI, 0, Math.PI * 2); gCtx.fill(); }
       gCtx.globalAlpha = 1;
     } else {
+      // Snow panel — pure snow + ice tones, no dirt blotches.
       gCtx.fillStyle = '#e8e8f0'; gCtx.fillRect(0, 0, 256, 256);
       const snv = ['#dde0ea', '#f0f0f8', '#ccd0dd', '#e0e4ee', '#d0d8e8', '#f4f4fa'];
       for (let i = 0; i < 150; i++) { gCtx.fillStyle = snv[Math.floor(Math.random() * snv.length)]; gCtx.beginPath(); gCtx.ellipse(Math.random() * 256, Math.random() * 256, 3 + Math.random() * 12, 2 + Math.random() * 8, Math.random() * Math.PI, 0, Math.PI * 2); gCtx.fill(); }
       for (let i = 0; i < 10; i++) { gCtx.globalAlpha = 0.2 + Math.random() * 0.3; gCtx.fillStyle = '#aaccee'; gCtx.beginPath(); gCtx.ellipse(Math.random() * 256, Math.random() * 256, 3 + Math.random() * 10, 2 + Math.random() * 8, Math.random() * Math.PI, 0, Math.PI * 2); gCtx.fill(); }
-      for (let i = 0; i < 15; i++) { gCtx.globalAlpha = 0.2 + Math.random() * 0.3; gCtx.fillStyle = '#7a7060'; gCtx.beginPath(); gCtx.ellipse(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 3, 1 + Math.random() * 2, Math.random() * Math.PI, 0, Math.PI * 2); gCtx.fill(); }
       gCtx.globalAlpha = 1;
     }
-    const groundTexture = new THREE.CanvasTexture(groundCanvas);
-    groundTexture.wrapS = THREE.RepeatWrapping;
-    groundTexture.wrapT = THREE.RepeatWrapping;
-    groundTexture.repeat.set(12, 12);
+    let groundTexture: THREE.Texture;
+    let realTile = 8;
+    let normalImg: HTMLImageElement | null = null;
+    let compositeCanvas: HTMLCanvasElement | null = null;
+
+    if (config.label === 'RANDOMSTUFF' || config.label === 'FOREST') {
+      realTile = 12;
+      if (this.grassImage) {
+        const realTex = new THREE.Texture(this.grassImage);
+        realTex.wrapS = THREE.RepeatWrapping; realTex.wrapT = THREE.RepeatWrapping;
+        realTex.repeat.set(realTile, realTile);
+        realTex.colorSpace = THREE.SRGBColorSpace;
+        realTex.needsUpdate = true;
+        groundTexture = realTex;
+      } else {
+        const canvasTex = new THREE.CanvasTexture(groundCanvas);
+        canvasTex.wrapS = THREE.RepeatWrapping; canvasTex.wrapT = THREE.RepeatWrapping;
+        canvasTex.repeat.set(12, 12);
+        groundTexture = canvasTex;
+      }
+    } else if (config.label === 'DESERT') {
+      realTile = 6;
+      normalImg = this.sandNormalImage;
+      if (this.sandImage) {
+        const realTex = new THREE.Texture(this.sandImage);
+        realTex.wrapS = THREE.RepeatWrapping; realTex.wrapT = THREE.RepeatWrapping;
+        realTex.repeat.set(realTile, realTile);
+        realTex.colorSpace = THREE.SRGBColorSpace;
+        realTex.needsUpdate = true;
+        groundTexture = realTex;
+      } else {
+        const canvasTex = new THREE.CanvasTexture(groundCanvas);
+        canvasTex.wrapS = THREE.RepeatWrapping; canvasTex.wrapT = THREE.RepeatWrapping;
+        canvasTex.repeat.set(12, 12);
+        groundTexture = canvasTex;
+      }
+    } else if (config.label === 'SNOW') {
+      realTile = 5;
+      normalImg = this.snowNormalImage;
+      if (this.snowImage) {
+        const realTex = new THREE.Texture(this.snowImage);
+        realTex.wrapS = THREE.RepeatWrapping; realTex.wrapT = THREE.RepeatWrapping;
+        realTex.repeat.set(realTile, realTile);
+        realTex.colorSpace = THREE.SRGBColorSpace;
+        realTex.needsUpdate = true;
+        groundTexture = realTex;
+      } else {
+        const canvasTex = new THREE.CanvasTexture(groundCanvas);
+        canvasTex.wrapS = THREE.RepeatWrapping; canvasTex.wrapT = THREE.RepeatWrapping;
+        canvasTex.repeat.set(12, 12);
+        groundTexture = canvasTex;
+      }
+    } else {
+      const canvasTex = new THREE.CanvasTexture(groundCanvas);
+      canvasTex.wrapS = THREE.RepeatWrapping; canvasTex.wrapT = THREE.RepeatWrapping;
+      canvasTex.repeat.set(12, 12);
+      groundTexture = canvasTex;
+    }
+    void compositeCanvas; // silence unused
     const groundGeo = new THREE.PlaneGeometry(200, 200);
     const groundMat = new THREE.MeshStandardMaterial({ map: groundTexture, roughness: 0.95, metalness: 0 });
+    if (normalImg) {
+      const nrm = new THREE.Texture(normalImg);
+      nrm.wrapS = THREE.RepeatWrapping;
+      nrm.wrapT = THREE.RepeatWrapping;
+      nrm.repeat.set(realTile, realTile);
+      nrm.needsUpdate = true;
+      groundMat.normalMap = nrm;
+      groundMat.normalScale = new THREE.Vector2(1.2, 1.2);
+    }
     groundMat.side = THREE.DoubleSide;
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
@@ -269,7 +391,8 @@ export class TitleScene extends Phaser.Scene {
     const isForest = config.label === 'FOREST';
     const snowMat = new THREE.MeshStandardMaterial({ color: 0xeeeef4, roughness: 0.9 });
 
-    // Trees (all worlds except desert)
+    // Trees (all worlds except desert). Snow world keeps green pines — they look like
+    // classic Christmas trees with snow caps on top.
     if (!isDesert) {
       const leafColor = isSnow ? 0x1a4a1a : isForest ? 0x1a3a0a : 0x2d5a1e;
       const leafMat = new THREE.MeshStandardMaterial({ color: leafColor });
@@ -287,9 +410,12 @@ export class TitleScene extends Phaser.Scene {
           }
         }
         if (isSnow) {
-          while ((Math.abs(tx - 1.5) < 3 && Math.abs(tz - 6) < 3) || (Math.abs(tx + 1.5) < 3 && Math.abs(tz - 5) < 3)) {
+          // Keep trees away from the T-Rex centered at (0, 0, 0).
+          let safety = 0;
+          while (Math.abs(tx) < 4 && Math.abs(tz) < 4 && safety < 30) {
             tx = (Math.random() - 0.5) * 16;
             tz = Math.random() * 10 - 2;
+            safety++;
           }
         }
         if (isForest) {
@@ -794,18 +920,8 @@ export class TitleScene extends Phaser.Scene {
       }
     }
 
-    // Randomstuff — road
+    // Randomstuff — rocks (no road)
     if (config.label === 'RANDOMSTUFF') {
-      const roadMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.95 });
-      const road = new THREE.Mesh(new THREE.PlaneGeometry(3, 60), roadMat);
-      road.rotation.x = -Math.PI / 2; road.position.set(2, 0.01, 3);
-      scene.add(road);
-      const lineMat = new THREE.MeshStandardMaterial({ color: 0xeeee44 });
-      for (let i = 0; i < 10; i++) {
-        const ln = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 1.5), lineMat);
-        ln.rotation.x = -Math.PI / 2; ln.position.set(2, 0.02, 8 - i * 3);
-        scene.add(ln);
-      }
       const rockMat = new THREE.MeshStandardMaterial({ color: 0x777766, roughness: 0.9 });
       for (let i = 0; i < 5; i++) {
         const rock = new THREE.Mesh(new THREE.SphereGeometry(0.2 + Math.random() * 0.3, 5, 4), rockMat);
@@ -814,13 +930,38 @@ export class TitleScene extends Phaser.Scene {
         scene.add(rock);
       }
 
-      // T-Rex — same model as createCars() T-Rex in BattleScene
-      {
+      // T-Rex — use real GLB model if loaded, fallback to procedural model otherwise
+      if (this.trexModel) {
+        // SkeletonUtils.clone() so the rig is properly cloned (the regular .clone() shares bones
+        // and produces messed-up sizes/poses).
+        const trex = cloneSkinned(this.trexModel) as THREE.Object3D;
+        // Direct scale — set how big the T-Rex is on the front cover panel.
+        const trexScale = 0.3;
+        trex.scale.setScalar(trexScale);
+        trex.position.set(0, 0, 0);
+        trex.rotation.y = -0.4; // flipped 180° again
+        scene.add(trex);
+        // Add a bot riding on top.
+        const trexRider = this.createRider();
+        trexRider.scale.setScalar(0.7);
+        trexRider.position.set(0, 2.8, 0);
+        trexRider.rotation.y = -0.4;
+        scene.add(trexRider);
+      } else {
         const bodyCol = 0x4a3a28, lightCol = 0x6a5a3a;
         const bellyCol = lightCol + 0x201810;
         const scaleCol = bodyCol - 0x101010;
         const clawCol = 0x1a1a10;
-        const dm = (c: number) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
+        // Real iguana-skin photo for the body — preloaded so it's ready before the panel snapshot.
+        let trexSkin: THREE.Texture | null = null;
+        if (this.trexSkinImage) {
+          trexSkin = new THREE.Texture(this.trexSkinImage);
+          trexSkin.wrapS = trexSkin.wrapT = THREE.RepeatWrapping;
+          trexSkin.repeat.set(3, 3);
+          trexSkin.colorSpace = THREE.SRGBColorSpace;
+          trexSkin.needsUpdate = true;
+        }
+        const dm = (c: number) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85, map: trexSkin || undefined });
         const sm2 = (c: number) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.3 });
         const trex = new THREE.Group();
         // Body
@@ -933,19 +1074,19 @@ export class TitleScene extends Phaser.Scene {
             claw.position.set(c * 0.14, -0.1, 0.72); claw.rotation.x = Math.PI / 2 + 0.2; footP.add(claw);
           }
         }
-        // Tiny arms
+        // Real tiny T-Rex arms — comically small, like the actual dino
         for (const side of [-1, 1]) {
           const armP = new THREE.Group();
-          armP.position.set(side * 0.65, 2.8, 1.3); trex.add(armP);
-          const upArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), dm(lightCol));
-          upArm.position.y = -0.18; armP.add(upArm);
-          const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.25, 0.1), dm(bodyCol + 0x101008));
-          forearm.position.set(0, -0.45, 0.05); armP.add(forearm);
+          armP.position.set(side * 0.55, 2.95, 1.1); trex.add(armP);
+          const upArm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 0.08), dm(lightCol));
+          upArm.position.y = -0.09; armP.add(upArm);
+          const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.13, 0.06), dm(bodyCol + 0x101008));
+          forearm.position.set(0, -0.24, 0.03); armP.add(forearm);
           for (const f of [-1, 1]) {
-            const finger = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.04), dm(bodyCol));
-            finger.position.set(f * 0.04, -0.6, 0.05); armP.add(finger);
-            const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 3), sm2(clawCol));
-            fClaw.position.set(f * 0.04, -0.68, 0.05); fClaw.rotation.x = Math.PI; armP.add(fClaw);
+            const finger = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.06, 0.025), dm(bodyCol));
+            finger.position.set(f * 0.025, -0.33, 0.03); armP.add(finger);
+            const fClaw = new THREE.Mesh(new THREE.ConeGeometry(0.014, 0.05, 3), sm2(clawCol));
+            fClaw.position.set(f * 0.025, -0.38, 0.03); fClaw.rotation.x = Math.PI; armP.add(fClaw);
           }
           armP.rotation.z = side * 0.5; armP.rotation.x = -0.3;
         }
@@ -1421,42 +1562,45 @@ export class TitleScene extends Phaser.Scene {
       rHand.position.y = -0.27;
       rightForearm.add(rHand);
 
-      // In-game bot gun — detailed machine gun matching BattleScene lines 5597-5633
-      const gMetal = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 });
-      const gBody = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.7, roughness: 0.3 });
+      // Hold the rifle horizontally across the chest, like a real soldier in the photos:
+      // stock at the right shoulder, barrel out forward in the bot's facing direction.
       const gunGroup = new THREE.Group();
-      gunGroup.position.set(0, -0.28, 0.15);
-      const recv = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 0.3), gBody);
-      gunGroup.add(recv);
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.02, 0.35, 6), gMetal);
-      barrel.rotation.x = Math.PI / 2;
-      barrel.position.z = 0.32;
-      gunGroup.add(barrel);
-      const shroud = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.2, 6, 1, true),
-        new THREE.MeshStandardMaterial({ color: 0x2a2a2a, metalness: 0.6, side: THREE.DoubleSide }));
-      shroud.rotation.x = Math.PI / 2;
-      shroud.position.z = 0.25;
-      gunGroup.add(shroud);
-      const muz = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.018, 0.04, 6), gMetal);
-      muz.rotation.x = Math.PI / 2;
-      muz.position.z = 0.5;
-      gunGroup.add(muz);
-      const mag = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.1, 0.03), gMetal);
-      mag.position.set(0, -0.08, 0.05);
-      gunGroup.add(mag);
-      const stk = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.05, 0.15), gBody);
-      stk.position.z = -0.22;
-      gunGroup.add(stk);
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.008, 0.18), gMetal);
-      rail.position.set(0, 0.035, 0.05);
-      gunGroup.add(rail);
-      rightForearm.add(gunGroup);
+      gunGroup.position.set(0.15, 0.35, 0.45);
+      gunGroup.rotation.y = Math.PI; // face the other way
+      if (this.arModel) {
+        const ar = this.arModel.clone(true);
+        const bb = new THREE.Box3().setFromObject(ar);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const longest = Math.max(size.x, size.y, size.z) || 1;
+        const fit = 1.5 / longest;
+        ar.scale.setScalar(fit);
+        const cx = (bb.min.x + bb.max.x) / 2 * fit;
+        const cy = (bb.min.y + bb.max.y) / 2 * fit;
+        const cz = (bb.min.z + bb.max.z) / 2 * fit;
+        ar.position.set(-cx, -cy, -cz);
+        gunGroup.add(ar);
+      } else {
+        const gMetal = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 });
+        const gBody = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.7, roughness: 0.3 });
+        const recv = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 0.3), gBody);
+        gunGroup.add(recv);
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.02, 0.35, 6), gMetal);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.z = 0.32;
+        gunGroup.add(barrel);
+      }
+      torso.add(gunGroup);
 
-      // In-game bot resting/firing pose — arms hang, right forearm bent to hold gun
-      leftUpperArm.rotation.x = 0;
-      rightUpperArm.rotation.x = 0;
-      leftForearm.rotation.x = -0.05;
-      rightForearm.rotation.x = -0.3;
+      // Real rifle-aiming pose — like a soldier holding a rifle:
+      //   Right arm: upper arm at side, forearm bent forward across body to grip the receiver.
+      //   Left arm: raised forward and across to support the barrel/foregrip.
+      rightUpperArm.rotation.x = -0.4;
+      rightUpperArm.rotation.z = -0.15;
+      rightForearm.rotation.x = -1.5;
+      leftUpperArm.rotation.x = -0.8;
+      leftUpperArm.rotation.z = 0.4;
+      leftForearm.rotation.x = -1.3;
 
       // No muzzle flash — nobody is shooting on the cover
 
