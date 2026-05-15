@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  base: '/fon9/',
+  base: '/micahgame/',
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
@@ -22,7 +22,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,png,jpg,jpeg,svg,ico,woff,woff2,ttf,mp3,wav,ogg,json}'],
         maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
-        navigateFallback: '/fon9/index.html',
+        navigateFallback: '/micahgame/index.html',
         runtimeCaching: [
           {
             urlPattern: /.*/,
