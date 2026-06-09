@@ -9801,10 +9801,10 @@ export class BattleScene extends Phaser.Scene {
 
   // ===== BATTLE MUSIC =====
   private startBattleMusic(): void {
-    // Drop your MP3 at public/assets/music/battle.mp3 — it auto-loops at low volume
-    const audio = new Audio('assets/music/battle.mp3');
+    const base = (import.meta.env?.BASE_URL ?? '/') + 'sounds/';
+    const audio = new Audio(base + 'fightingWarsTheme.mp3');
     audio.loop = true;
-    audio.volume = 0.35;
+    audio.volume = 0.5;
     // Browsers block autoplay until first user gesture; retry on click/key
     const tryPlay = () => audio.play().catch(() => { /* ignore until gesture */ });
     tryPlay();
