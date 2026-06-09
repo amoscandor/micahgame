@@ -7748,32 +7748,7 @@ export class BattleScene extends Phaser.Scene {
         car.mesh.position.z = Math.sign(car.mesh.position.z) * 449;
       }
 
-      // T-Rex / quad ride only stomps things when SOMEONE (player or NPC) is riding it.
-      // Wild rides are peaceful.
-      if (car.driver !== 'none') {
-        for (let ni = 0; ni < this.npcs.length; ni++) {
-          const npc = this.npcs[ni];
-          if (npc.dead || ni === car.driver) continue;
-          // Don't eat NPCs that are riding T-Rexes
-          if (this.cars.some(c => c.driver === ni)) continue;
-          const ndx = npc.mesh.position.x - car.mesh.position.x;
-          const ndz = npc.mesh.position.z - car.mesh.position.z;
-          const ndist = Math.sqrt(ndx * ndx + ndz * ndz);
-          if (ndist < 2.5) {
-            // Stomp damages instead of insta-killing — takes 20 stomps to kill (0.4 dmg × 20 = 8 hp).
-            npc.hp -= 0.4;
-            if (npc.hp <= 0) {
-              this.killNpc(npc);
-              this.showPickupMsg('SQUISHED!');
-              this.spawnDeathFluff(npc.mesh.position.clone());
-            } else {
-              this.updateHealthBar(npc.healthCtx, npc.healthTex, npc.hp, 8);
-            }
-          }
-        }
-
-        // T-Rexes / quads no longer stomp the player — they only stomp NPCs.
-      }
+      // Car/T-Rex/quad squishing disabled
 
       // Running animation — works for all dino types
       const spd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
