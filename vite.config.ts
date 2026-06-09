@@ -26,10 +26,11 @@ export default defineConfig({
         runtimeCaching: [
           {
             urlPattern: /.*/,
-            handler: 'CacheFirst',
+            handler: 'NetworkFirst',
             options: {
               cacheName: 'fighting-wars-all',
               expiration: { maxEntries: 500 },
+              networkTimeoutSeconds: 5,
             },
           },
         ],
