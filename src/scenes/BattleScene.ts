@@ -7762,7 +7762,6 @@ export class BattleScene extends Phaser.Scene {
           if (ndist < 2.5) {
             // Stomp damages instead of insta-killing — takes 20 stomps to kill (0.4 dmg × 20 = 8 hp).
             npc.hp -= 0.4;
-            this.playSfx('hit', 0.4);
             if (npc.hp <= 0) {
               this.killNpc(npc);
               this.showPickupMsg('SQUISHED!');
@@ -9032,7 +9031,6 @@ export class BattleScene extends Phaser.Scene {
           const dist = Math.sqrt(dx * dx + dz * dz);
           if (dist < 1.0) {
             npc.hp -= 1; // each bullet always chips off 1 — guns kill faster by firing more
-            this.playSfx('hit', 0.3);
             hit = true;
             if (npc.hp <= 0) {
               this.killNpc(npc);
@@ -9060,7 +9058,6 @@ export class BattleScene extends Phaser.Scene {
           const d = Math.sqrt(dx * dx + dz * dz);
           if (d < 3 && Math.abs(dy) < 5) {
             car.hp -= b.damage;
-            this.playSfx('hit', 0.5);
             hit = true;
             if (car.healthCtx && car.healthTex && car.maxHp) {
               this.updateHealthBar(car.healthCtx, car.healthTex, Math.max(0, car.hp), car.maxHp);
@@ -9099,7 +9096,6 @@ export class BattleScene extends Phaser.Scene {
           const dist = Math.sqrt(dx * dx + dz * dz);
           if (dist < 1.2) {
             hit = true;
-            this.playSfx('hit', 0.3);
             // Tell the other player they got hit
             this.network.send({ type: 'PLAYER_HIT', targetId: pid, damage: b.damage });
             break;
@@ -9117,7 +9113,6 @@ export class BattleScene extends Phaser.Scene {
           const sdist = Math.sqrt(sx * sx + sz * sz);
           if (sdist < 2.0) {
             s.hp -= 1;
-            this.playSfx('hit', 0.3);
             hit = true;
             if (s.hp <= 0) {
               this.coinsEarned += 500;
@@ -9140,7 +9135,6 @@ export class BattleScene extends Phaser.Scene {
           const hd = Math.sqrt(hx * hx + hz * hz);
           if (hd < 1.5) {
             h.hp -= 1;
-            this.playSfx('hit', 0.3);
             hit = true;
             if (h.hp <= 0) {
               this.coinsEarned += 250;
