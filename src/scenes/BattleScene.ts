@@ -7649,7 +7649,7 @@ export class BattleScene extends Phaser.Scene {
         // Update engine pitch based on actual speed
         const actualSpd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
       } else if (typeof car.driver === 'number') {
-        // NPC drives — chase nearest enemy (other NPCs OR the player)
+        // NPC drives — just wander peacefully, don't chase anyone
         const npc = this.npcs[car.driver];
         if (!npc || npc.dead) {
           car.driver = 'none';
@@ -7658,36 +7658,23 @@ export class BattleScene extends Phaser.Scene {
           continue;
         }
 
-        // Pick the nearest enemy: other NPCs (not in cars) and the player.
-        let tx = 0, tz = 0;
-        let bestDist = 99999;
-        for (let j = 0; j < this.npcs.length; j++) {
-          if (j === car.driver || this.npcs[j].dead) continue;
-          if (this.cars.some(c => c.driver === j)) continue; // skip NPCs in cars
-          const od = Math.sqrt(
-            (this.npcs[j].mesh.position.x - car.mesh.position.x) ** 2 +
-            (this.npcs[j].mesh.position.z - car.mesh.position.z) ** 2
-          );
-          if (od < bestDist) {
-            bestDist = od;
-            tx = this.npcs[j].mesh.position.x;
-            tz = this.npcs[j].mesh.position.z;
-          }
+        car.wanderTimer = (car.wanderTimer ?? 0) - dt;
+        if (car.wanderTimer <= 0 || car.wanderAngle === undefined) {
+          car.wanderAngle = Math.random() * Math.PI * 2;
+          car.wanderTimer = 3 + Math.random() * 4;
+          car.wanderSpeed = 12 + Math.random() * 10;
         }
-        // T-Rex/quad riders only chase OTHER NPCs — not the player.
-
-        const ddx = tx - car.mesh.position.x;
-        const ddz = tz - car.mesh.position.z;
-        const dlen = Math.sqrt(ddx * ddx + ddz * ddz);
-        if (dlen > 1) {
-          car.vx = (ddx / dlen) * car.speed;
-          car.vz = (ddz / dlen) * car.speed;
-        }
-
+        const wSpd = car.wanderSpeed ?? 5;
+        car.vx = Math.sin(car.wanderAngle) * wSpd;
+        car.vz = Math.cos(car.wanderAngle) * wSpd;
         car.mesh.position.x += car.vx * dt;
         car.mesh.position.z += car.vz * dt;
         car.mesh.position.y = this.getTerrainHeight(car.mesh.position.x, car.mesh.position.z);
-        if (dlen > 1) car.mesh.rotation.y = Math.atan2(car.vx, car.vz);
+        car.mesh.rotation.y = Math.atan2(car.vx, car.vz);
+        if (Math.abs(car.mesh.position.x) > 400 || Math.abs(car.mesh.position.z) > 400) {
+          car.wanderAngle += Math.PI;
+          car.wanderTimer = 3 + Math.random() * 4;
+        }
 
         // Place the NPC rider visibly on the seat (same math as the player rider).
         const dinoScale = car.mesh.scale.y;
