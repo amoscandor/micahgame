@@ -9182,14 +9182,7 @@ export class BattleScene extends Phaser.Scene {
       this.playerPos.add(move);
     }
 
-    // Footstep sounds
-    if (isMoving) {
-      this.footstepTimer -= dt;
-      if (this.footstepTimer <= 0) {
-        this.playSfx('step', 0.2);
-        this.footstepTimer = 0.35;
-      }
-    }
+    // Footstep sounds disabled
 
     // Collision — push out of solid objects
     const playerR = 0.4;
