@@ -8350,7 +8350,6 @@ export class BattleScene extends Phaser.Scene {
       this.bossAttackTimer = 1.5; // attack every 1.5 seconds
       // Damage player
       this.playerHP = Math.max(0, this.playerHP - 20);
-      this.playSfx('hurt', 0.6);
       this.hpText.textContent = `HP: ${this.playerHP}`;
       // Knockback
       if (dist > 0.5) {
@@ -9015,7 +9014,6 @@ export class BattleScene extends Phaser.Scene {
         if (dist < hitRadius) {
           const dmg = b.owner === 9999 ? 8 : 5;
           this.playerHP = Math.max(0, this.playerHP - dmg);
-          this.playSfx('hurt', 0.5);
           hit = true;
           this.hpText.textContent = `HP: ${this.playerHP}`;
           if (this.playerHP <= 0) {
@@ -10506,7 +10504,6 @@ export class BattleScene extends Phaser.Scene {
         // Another player says we got hit
         if (msg.targetId === this.network.playerId) {
           this.playerHP = Math.max(0, this.playerHP - msg.damage * 5);
-          this.playSfx('hurt', 0.5);
           if (this.hpText) this.hpText.textContent = `HP: ${this.playerHP}`;
           if (this.playerHP <= 0) {
             this.network.send({ type: 'PLAYER_DEAD', playerId: this.network.playerId });
