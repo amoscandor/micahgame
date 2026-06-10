@@ -8474,6 +8474,7 @@ export class BattleScene extends Phaser.Scene {
 
     // === FLOATING JOYSTICK (appears where you touch on left half) ===
     const joystickBase = document.createElement('div');
+    joystickBase.id = 'battle-joystick';
     joystickBase.style.cssText = 'position:fixed;left:30px;bottom:40px;width:150px;height:150px;border-radius:50%;background:rgba(255,255,255,0.12);border:3px solid rgba(255,255,255,0.25);z-index:1500;pointer-events:none;display:none;';
     document.body.appendChild(joystickBase);
     const joystickThumb = document.createElement('div');
@@ -8482,12 +8483,14 @@ export class BattleScene extends Phaser.Scene {
 
     // === FIRE BUTTON (big, right side bottom) ===
     const shootBtn = document.createElement('div');
+    shootBtn.id = 'battle-shoot-btn';
     shootBtn.style.cssText = 'position:fixed;right:20px;bottom:30px;width:100px;height:100px;border-radius:50%;background:rgba(255,40,40,0.55);border:4px solid rgba(255,100,100,0.7);z-index:1500;display:flex;align-items:center;justify-content:center;font:bold 18px Arial;color:white;text-shadow:1px 1px 3px black;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;';
     shootBtn.textContent = 'FIRE';
     document.body.appendChild(shootBtn);
 
     // === ENTER/EXIT CAR BUTTON ===
     const carBtn = document.createElement('div');
+    carBtn.id = 'battle-car-btn';
     carBtn.style.cssText = 'position:fixed;right:135px;bottom:35px;width:70px;height:70px;border-radius:50%;background:rgba(50,200,50,0.5);border:3px solid rgba(100,255,100,0.6);z-index:1500;display:flex;align-items:center;justify-content:center;font:bold 13px Arial;color:white;text-shadow:1px 1px 2px black;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;';
     carBtn.textContent = 'RIDE';
     this.carBtn = carBtn;
@@ -8495,6 +8498,7 @@ export class BattleScene extends Phaser.Scene {
 
     // === JUMP BUTTON ===
     const jumpBtn = document.createElement('div');
+    jumpBtn.id = 'battle-jump-btn';
     jumpBtn.style.cssText = 'position:fixed;right:135px;bottom:115px;width:60px;height:60px;border-radius:50%;background:rgba(50,150,255,0.45);border:2px solid rgba(100,180,255,0.6);z-index:1500;display:flex;align-items:center;justify-content:center;font:bold 13px Arial;color:white;text-shadow:1px 1px 2px black;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;';
     jumpBtn.textContent = 'JUMP';
     document.body.appendChild(jumpBtn);
@@ -10392,7 +10396,7 @@ export class BattleScene extends Phaser.Scene {
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.88);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2147483000;-webkit-user-select:none';
     overlay.innerHTML = `
       <div style="color:white;font:bold 64px Arial;text-shadow:3px 3px 8px black;margin-bottom:30px">PAUSED</div>
-      <button id="pause-quit" style="padding:16px 50px;background:rgba(200,40,40,0.9);color:white;border:3px solid white;border-radius:12px;font:bold 26px Arial;cursor:pointer;margin:10px">QUIT TO TITLE</button>
+      <button id="pause-quit" style="padding:16px 50px;background:rgba(200,40,40,0.9);color:white;border:3px solid white;border-radius:12px;font:bold 26px Arial;cursor:pointer;margin:10px">QUIT</button>
       <button id="pause-resume" style="padding:16px 50px;background:rgba(40,160,60,0.9);color:white;border:3px solid white;border-radius:12px;font:bold 26px Arial;cursor:pointer;margin:10px">RESUME</button>
     `;
     document.body.appendChild(overlay);
@@ -10479,10 +10483,13 @@ export class BattleScene extends Phaser.Scene {
     this.stopBattleMusic();
     this.threeRenderer.domElement.remove();
     this.threeRenderer.dispose();
-    const hud = document.getElementById('hud-3d');
-    if (hud) hud.remove();
-    const pauseOverlay = document.getElementById('pause-overlay');
-    if (pauseOverlay) pauseOverlay.remove();
+    // Tear down every DOM element BattleScene added to <body>.
+    const ids = ['hud-3d', 'pause-overlay', 'battle-joystick', 'battle-shoot-btn',
+                 'battle-car-btn', 'battle-jump-btn', 'fp-toggle-btn'];
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }
     this.paused = false;
     // Show Phaser canvas again
     this.game.canvas.style.display = '';
