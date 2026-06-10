@@ -84,9 +84,11 @@ export class BattleScene extends Phaser.Scene {
   private carBtn: HTMLDivElement | null = null;
   private playerGun = 'None';
   private playerAmmo = 0;
-  // 5-slot hotbar inventory. selectedSlot mirrors playerGun/playerAmmo (live).
-  // Other slots remember (gun, ammo) pairs stashed there.
-  private inventory: Array<{ name: string; ammo: number } | null> = [null, null, null, null, null];
+  private playerItemCount = 0;
+  // 5-slot hotbar inventory. selectedSlot mirrors playerGun/playerAmmo/playerItemCount.
+  // Slot shape: { name, ammo, count }. For guns count=1 + ammo=bullets.
+  // For stackables (pizza, cookie) ammo=0 + count=stack size (up to 10).
+  private inventory: Array<{ name: string; ammo: number; count: number } | null> = [null, null, null, null, null];
   private selectedSlot = 0;
   private hotbarDiv: HTMLDivElement | null = null;
   private ammoText!: HTMLDivElement;
@@ -8663,84 +8665,152 @@ export class BattleScene extends Phaser.Scene {
     document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false } as EventListenerOptions);
   }
 
+  private getSlot(i: number): { name: string; ammo: number; count: number } | null {
+    if (i === this.selectedSlot) {
+      return this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo, count: this.playerItemCount };
+    }
+    return this.inventory[i];
+  }
+
+  private setSlot(i: number, slot: { name: string; ammo: number; count: number } | null): void {
+    if (i === this.selectedSlot) {
+      this.playerGun = slot?.name ?? 'None';
+      this.playerAmmo = slot?.ammo ?? 0;
+      this.playerItemCount = slot?.count ?? 0;
+      if (this.gunText) this.gunText.textContent = 'Gun: ' + this.playerGun;
+      this.updateAmmoText();
+      this.updateFpGunModel();
+    } else {
+      this.inventory[i] = slot;
+    }
+  }
+
   private selectSlot(idx: number): void {
     if (idx < 0 || idx >= 5 || idx === this.selectedSlot) return;
-    // Stash what's currently in hand into the slot we're leaving.
     this.inventory[this.selectedSlot] = this.playerGun === 'None'
       ? null
-      : { name: this.playerGun, ammo: this.playerAmmo };
-    // Pull the new slot into hand.
+      : { name: this.playerGun, ammo: this.playerAmmo, count: this.playerItemCount };
     this.selectedSlot = idx;
     const slot = this.inventory[idx];
     this.playerGun = slot?.name ?? 'None';
     this.playerAmmo = slot?.ammo ?? 0;
+    this.playerItemCount = slot?.count ?? 0;
     if (this.gunText) this.gunText.textContent = 'Gun: ' + this.playerGun;
     this.updateAmmoText();
     this.updateFpGunModel();
     this.updateHotbarUI();
   }
 
+  // Pizza/cookie are stackable consumables. Everything else is a gun (one per slot).
+  private static STACKABLE = new Set(['pizza', 'cookie']);
+  private static STACK_MAX = 10;
+
+  private slotIcon(name: string): string {
+    if (name === 'pizza') return '<span style="font-size:24px">🍕</span>';
+    if (name === 'cookie') return '<span style="font-size:24px">🍪</span>';
+    // Gun: simple horizontal silhouette in the rarity color
+    const wep = Object.values(WEAPONS).find(w => w.name === name);
+    const color = wep ? '#' + wep.color.toString(16).padStart(6, '0') : '#888';
+    return `<svg width="40" height="18" viewBox="0 0 40 18">
+      <rect x="2" y="6" width="16" height="8" rx="1" fill="${color}"/>
+      <rect x="18" y="8" width="20" height="4" fill="${color}"/>
+      <rect x="5" y="13" width="5" height="5" fill="${color}"/>
+    </svg>`;
+  }
+
   private updateHotbarUI(): void {
     if (!this.hotbarDiv) return;
     for (let i = 0; i < 5; i++) {
       const isSel = i === this.selectedSlot;
-      const slot = isSel
-        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
-        : this.inventory[i];
+      const slot = this.getSlot(i);
       const el = document.getElementById(`hotbar-slot-${i}`);
       if (!el) continue;
       el.style.borderColor = isSel ? '#ffcc00' : 'rgba(255,255,255,0.5)';
       el.style.background = isSel ? 'rgba(255,200,0,0.25)' : 'rgba(0,0,0,0.5)';
-      const name = slot?.name ?? '';
-      const ammo = slot?.ammo ?? 0;
-      el.innerHTML = `<div style="font-size:10px;color:#fff;font-weight:bold">${i+1}</div>
-        <div style="font-size:10px;color:#ffcc00;font-weight:bold;margin-top:2px;text-align:center;line-height:1.1">${name.substring(0,8)}</div>
-        ${name ? `<div style="font-size:10px;color:#ffeebb">${ammo}</div>` : ''}`;
+      if (!slot) {
+        el.innerHTML = '';
+        continue;
+      }
+      const isStack = BattleScene.STACKABLE.has(slot.name);
+      const badge = isStack ? `x${slot.count}` : `${slot.ammo}`;
+      el.innerHTML = `${this.slotIcon(slot.name)}
+        <div style="font-size:11px;color:#ffeebb;font-weight:bold;margin-top:2px">${badge}</div>`;
     }
   }
 
   private addToInventory(name: string, ammo: number): void {
-    // Match by name first — refill ammo if you already have this gun.
+    // Refill if we already have this gun.
     for (let i = 0; i < 5; i++) {
-      const s = i === this.selectedSlot
-        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
-        : this.inventory[i];
-      if (s && s.name === name) {
-        if (i === this.selectedSlot) {
-          this.playerAmmo = Math.max(this.playerAmmo, ammo);
-        } else {
-          this.inventory[i] = { name, ammo: Math.max(s.ammo, ammo) };
-        }
+      const s = this.getSlot(i);
+      if (s && s.name === name && !BattleScene.STACKABLE.has(name)) {
+        this.setSlot(i, { name, ammo: Math.max(s.ammo, ammo), count: 1 });
         this.updateHotbarUI();
         return;
       }
     }
-    // No match — first empty slot.
+    // First empty slot.
     for (let i = 0; i < 5; i++) {
-      const s = i === this.selectedSlot
-        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
-        : this.inventory[i];
-      if (!s) {
-        if (i === this.selectedSlot) {
-          this.playerGun = name;
-          this.playerAmmo = ammo;
-          if (this.gunText) this.gunText.textContent = 'Gun: ' + name;
-          this.updateAmmoText();
-          this.updateFpGunModel();
-        } else {
-          this.inventory[i] = { name, ammo };
-        }
+      if (!this.getSlot(i)) {
+        this.setSlot(i, { name, ammo, count: 1 });
         this.updateHotbarUI();
         return;
       }
     }
-    // No empty slot — replace the currently selected one.
-    this.playerGun = name;
-    this.playerAmmo = ammo;
-    if (this.gunText) this.gunText.textContent = 'Gun: ' + name;
-    this.updateAmmoText();
-    this.updateFpGunModel();
+    // No empty slot — replace currently selected.
+    this.setSlot(this.selectedSlot, { name, ammo, count: 1 });
     this.updateHotbarUI();
+  }
+
+  // Add a stackable item (pizza/cookie). Up to STACK_MAX in one slot.
+  // Returns true if added, false if all matching slots are full (item is dropped).
+  private addStackable(name: string): boolean {
+    // Stack onto an existing pile if any has room.
+    for (let i = 0; i < 5; i++) {
+      const s = this.getSlot(i);
+      if (s && s.name === name && s.count < BattleScene.STACK_MAX) {
+        this.setSlot(i, { name, ammo: 0, count: s.count + 1 });
+        this.updateHotbarUI();
+        return true;
+      }
+    }
+    // No matching pile with room — find an empty slot.
+    for (let i = 0; i < 5; i++) {
+      if (!this.getSlot(i)) {
+        this.setSlot(i, { name, ammo: 0, count: 1 });
+        this.updateHotbarUI();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Consume one of the selected stackable item (pizza/cookie heals HP).
+  private consumeSelected(): boolean {
+    if (this.playerGun === 'None') return false;
+    if (!BattleScene.STACKABLE.has(this.playerGun)) return false;
+    if (this.playerItemCount <= 0) return false;
+    // Heal
+    this.playerHP = Math.min(this.playerMaxHP, this.playerHP + 25);
+    if (this.hpText) {
+      this.hpText.textContent = 'HP: ' + this.playerHP;
+      if (this.playerHP >= this.playerMaxHP * 0.75) this.hpText.style.color = '#44ff44';
+      else if (this.playerHP >= this.playerMaxHP * 0.4) this.hpText.style.color = '#ffcc00';
+      else this.hpText.style.color = '#ff4444';
+    }
+    this.showPickupMsg(`+25 HP from ${this.playerGun}!`);
+    this.playSfx('pickup', 0.5);
+    // Decrement / clear
+    this.playerItemCount -= 1;
+    if (this.playerItemCount <= 0) {
+      this.playerGun = 'None';
+      this.playerAmmo = 0;
+      this.playerItemCount = 0;
+      if (this.gunText) this.gunText.textContent = 'Gun: None';
+      this.updateAmmoText();
+      this.updateFpGunModel();
+    }
+    this.updateHotbarUI();
+    return true;
   }
 
   private setupKeyboard(): void {
@@ -8990,6 +9060,12 @@ export class BattleScene extends Phaser.Scene {
   private tryShoot(): void {
     if (this.shootCooldown > 0) return;
     if (this.playerGun === 'None') return;
+    // Stackable consumables (pizza/cookie) are eaten by the fire button instead of shot.
+    if (BattleScene.STACKABLE.has(this.playerGun)) {
+      this.consumeSelected();
+      this.shootCooldown = 0.4;
+      return;
+    }
 
     // Find weapon stats by name
     const wep = Object.values(WEAPONS).find(w => w.name === this.playerGun);
@@ -10282,21 +10358,19 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
-    // Cheese
+    // Pizza/cookie — stack into the hotbar (up to 10 per slot).
     for (const ch of this.cheesePickups) {
       if (ch.picked) continue;
       const dx = ch.group.position.x - px;
       const dz = ch.group.position.z - pz;
       if (dx * dx + dz * dz < pickRange * pickRange) {
-        ch.picked = true;
-        this.scene3d.remove(ch.group);
-        this.playerHP = Math.min(this.playerMaxHP, this.playerHP + 25);
-        this.hpText.textContent = 'HP: ' + this.playerHP;
-        if (this.playerHP >= this.playerMaxHP * 0.75) this.hpText.style.color = '#44ff44';
-        else if (this.playerHP >= this.playerMaxHP * 0.4) this.hpText.style.color = '#ffcc00';
-        else this.hpText.style.color = '#ff4444';
-        this.showPickupMsg(`+25 HP from ${ch.name === 'cookie' ? 'cookie' : 'pizza'}!`);
-        this.playSfx('pickup', 0.5);
+        const itemName = ch.name === 'cookie' ? 'cookie' : 'pizza';
+        if (this.addStackable(itemName)) {
+          ch.picked = true;
+          this.scene3d.remove(ch.group);
+          this.showPickupMsg(`Picked up ${itemName}!`);
+          this.playSfx('pickup', 0.5);
+        }
       }
     }
   }
@@ -10333,7 +10407,7 @@ export class BattleScene extends Phaser.Scene {
       </div>
       <button id="hud-pause" style="position:absolute;top:${mob?'env(safe-area-inset-top, 10px)':'15px'};right:15px;padding:${mob?'8px 16px':'10px 22px'};background:rgba(40,90,200,0.8);color:white;border:2px solid white;border-radius:8px;font:bold ${mob?14:18}px Arial;cursor:pointer;z-index:100;-webkit-user-select:none;pointer-events:auto">PAUSE</button>
       <div id="hud-hotbar" style="position:absolute;bottom:${mob?'calc(env(safe-area-inset-bottom, 10px) + 120px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:auto;-webkit-user-select:none">
-        ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?56:64}px;height:${mob?56:64}px;border:2px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"><div style="font-size:10px;color:#fff;font-weight:bold">${i+1}</div></div>`).join('')}
+        ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?56:64}px;height:${mob?56:64}px;border:2px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"></div>`).join('')}
       </div>
     `;
     document.body.appendChild(hud);
@@ -10403,9 +10477,8 @@ export class BattleScene extends Phaser.Scene {
     const resumeBtn = document.getElementById('pause-resume') as HTMLButtonElement;
     const quitBtn = document.getElementById('pause-quit') as HTMLButtonElement;
     const doQuit = () => {
-      this.resumeGame();
-      this.shutdown();
-      this.scene.start('TitleScene');
+      // Full reload guarantees a clean return to the title; no leftover Three.js / DOM state.
+      window.location.reload();
     };
     resumeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
