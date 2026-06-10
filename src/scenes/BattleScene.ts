@@ -84,6 +84,11 @@ export class BattleScene extends Phaser.Scene {
   private carBtn: HTMLDivElement | null = null;
   private playerGun = 'None';
   private playerAmmo = 0;
+  // 5-slot hotbar inventory. selectedSlot mirrors playerGun/playerAmmo (live).
+  // Other slots remember (gun, ammo) pairs stashed there.
+  private inventory: Array<{ name: string; ammo: number } | null> = [null, null, null, null, null];
+  private selectedSlot = 0;
+  private hotbarDiv: HTMLDivElement | null = null;
   private ammoText!: HTMLDivElement;
   private ammoPickups: { group: THREE.Group; picked: boolean }[] = [];
   private playerHealthBar!: THREE.Sprite;
@@ -5585,6 +5590,7 @@ export class BattleScene extends Phaser.Scene {
     this.ammoText.style.color = this.playerAmmo === 0 ? '#ff6644'
       : this.playerAmmo < 8 ? '#ffaa44'
       : '#ffeebb';
+    this.updateHotbarUI();
   }
 
   private createAmmo(): void {
@@ -8653,9 +8659,96 @@ export class BattleScene extends Phaser.Scene {
     document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false } as EventListenerOptions);
   }
 
+  private selectSlot(idx: number): void {
+    if (idx < 0 || idx >= 5 || idx === this.selectedSlot) return;
+    // Stash what's currently in hand into the slot we're leaving.
+    this.inventory[this.selectedSlot] = this.playerGun === 'None'
+      ? null
+      : { name: this.playerGun, ammo: this.playerAmmo };
+    // Pull the new slot into hand.
+    this.selectedSlot = idx;
+    const slot = this.inventory[idx];
+    this.playerGun = slot?.name ?? 'None';
+    this.playerAmmo = slot?.ammo ?? 0;
+    if (this.gunText) this.gunText.textContent = 'Gun: ' + this.playerGun;
+    this.updateAmmoText();
+    this.updateFpGunModel();
+    this.updateHotbarUI();
+  }
+
+  private updateHotbarUI(): void {
+    if (!this.hotbarDiv) return;
+    for (let i = 0; i < 5; i++) {
+      const isSel = i === this.selectedSlot;
+      const slot = isSel
+        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
+        : this.inventory[i];
+      const el = document.getElementById(`hotbar-slot-${i}`);
+      if (!el) continue;
+      el.style.borderColor = isSel ? '#ffcc00' : 'rgba(255,255,255,0.5)';
+      el.style.background = isSel ? 'rgba(255,200,0,0.25)' : 'rgba(0,0,0,0.5)';
+      const name = slot?.name ?? '';
+      const ammo = slot?.ammo ?? 0;
+      el.innerHTML = `<div style="font-size:10px;color:#fff;font-weight:bold">${i+1}</div>
+        <div style="font-size:10px;color:#ffcc00;font-weight:bold;margin-top:2px;text-align:center;line-height:1.1">${name.substring(0,8)}</div>
+        ${name ? `<div style="font-size:10px;color:#ffeebb">${ammo}</div>` : ''}`;
+    }
+  }
+
+  private addToInventory(name: string, ammo: number): void {
+    // Match by name first — refill ammo if you already have this gun.
+    for (let i = 0; i < 5; i++) {
+      const s = i === this.selectedSlot
+        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
+        : this.inventory[i];
+      if (s && s.name === name) {
+        if (i === this.selectedSlot) {
+          this.playerAmmo = Math.max(this.playerAmmo, ammo);
+        } else {
+          this.inventory[i] = { name, ammo: Math.max(s.ammo, ammo) };
+        }
+        this.updateHotbarUI();
+        return;
+      }
+    }
+    // No match — first empty slot.
+    for (let i = 0; i < 5; i++) {
+      const s = i === this.selectedSlot
+        ? (this.playerGun === 'None' ? null : { name: this.playerGun, ammo: this.playerAmmo })
+        : this.inventory[i];
+      if (!s) {
+        if (i === this.selectedSlot) {
+          this.playerGun = name;
+          this.playerAmmo = ammo;
+          if (this.gunText) this.gunText.textContent = 'Gun: ' + name;
+          this.updateAmmoText();
+          this.updateFpGunModel();
+        } else {
+          this.inventory[i] = { name, ammo };
+        }
+        this.updateHotbarUI();
+        return;
+      }
+    }
+    // No empty slot — replace the currently selected one.
+    this.playerGun = name;
+    this.playerAmmo = ammo;
+    if (this.gunText) this.gunText.textContent = 'Gun: ' + name;
+    this.updateAmmoText();
+    this.updateFpGunModel();
+    this.updateHotbarUI();
+  }
+
   private setupKeyboard(): void {
     const keys: Record<string, boolean> = {};
-    window.addEventListener('keydown', (e) => { keys[e.code] = true; });
+    window.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+      if (e.code === 'Digit1') this.selectSlot(0);
+      else if (e.code === 'Digit2') this.selectSlot(1);
+      else if (e.code === 'Digit3') this.selectSlot(2);
+      else if (e.code === 'Digit4') this.selectSlot(3);
+      else if (e.code === 'Digit5') this.selectSlot(4);
+    });
     window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
     // Mouse look
@@ -10161,13 +10254,10 @@ export class BattleScene extends Phaser.Scene {
       if (dx * dx + dz * dz < pickRange * pickRange) {
         gun.picked = true;
         this.scene3d.remove(gun.group);
-        this.playerGun = gun.name;
-        this.gunText.textContent = 'Gun: ' + gun.name;
-        this.gunText.style.color = '#' + gun.color.toString(16).padStart(6, '0');
-        // Starting ammo when you pick up a gun (melee weapons get nothing — they don't use bullets)
         const wep = Object.values(WEAPONS).find(w => w.name === gun.name);
-        if (wep && wep.type !== 'melee') this.playerAmmo = Math.max(this.playerAmmo, 120);
-        this.updateAmmoText();
+        const startAmmo = (wep && wep.type !== 'melee') ? 120 : 0;
+        this.addToInventory(gun.name, startAmmo);
+        if (this.gunText) this.gunText.style.color = '#' + gun.color.toString(16).padStart(6, '0');
         this.showPickupMsg('Picked up ' + gun.name + '!');
         this.playSfx('pickup', 0.5);
       }
@@ -10238,6 +10328,9 @@ export class BattleScene extends Phaser.Scene {
       <div id="hud-pickup" style="position:absolute;top:35%;left:50%;transform:translate(-50%,0);color:#ffffff;font:bold ${mob?20:22}px Arial;text-shadow:2px 2px 6px black;opacity:0;transition:opacity 0.3s;-webkit-user-select:none">
       </div>
       <button id="hud-pause" style="position:absolute;top:${mob?'env(safe-area-inset-top, 10px)':'15px'};right:15px;padding:${mob?'8px 16px':'10px 22px'};background:rgba(40,90,200,0.8);color:white;border:2px solid white;border-radius:8px;font:bold ${mob?14:18}px Arial;cursor:pointer;z-index:100;-webkit-user-select:none;pointer-events:auto">PAUSE</button>
+      <div id="hud-hotbar" style="position:absolute;bottom:${mob?'calc(env(safe-area-inset-bottom, 10px) + 120px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:auto;-webkit-user-select:none">
+        ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?56:64}px;height:${mob?56:64}px;border:2px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"><div style="font-size:10px;color:#fff;font-weight:bold">${i+1}</div></div>`).join('')}
+      </div>
     `;
     document.body.appendChild(hud);
     this.hudDiv = hud;
@@ -10247,6 +10340,12 @@ export class BattleScene extends Phaser.Scene {
     this.aliveText = document.getElementById('hud-alive') as HTMLDivElement;
     this.updateAmmoText();
     this.pickupMsg = document.getElementById('hud-pickup') as HTMLDivElement;
+    this.hotbarDiv = document.getElementById('hud-hotbar') as HTMLDivElement;
+    for (let i = 0; i < 5; i++) {
+      const el = document.getElementById(`hotbar-slot-${i}`);
+      if (el) el.addEventListener('click', (e) => { e.stopPropagation(); this.selectSlot(i); });
+    }
+    this.updateHotbarUI();
     const pauseBtn = document.getElementById('hud-pause')!;
     pauseBtn.addEventListener('click', (e) => {
       e.stopPropagation();
