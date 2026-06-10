@@ -8972,9 +8972,8 @@ export class BattleScene extends Phaser.Scene {
         const dx = b.mesh.position.x - this.playerPos.x;
         const dy = b.mesh.position.y - (this.playerPos.y + 1);
         const dz = b.mesh.position.z - this.playerPos.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         const hitRadius = b.owner === 9999 ? 2.0 : 1.0;
-        if (dist < hitRadius) {
+        if (dx * dx + dy * dy + dz * dz < hitRadius * hitRadius) {
           const dmg = b.owner === 9999 ? 8 : 5;
           this.playerHP = Math.max(0, this.playerHP - dmg);
           hit = true;
@@ -8992,8 +8991,7 @@ export class BattleScene extends Phaser.Scene {
           if (npc.dead || n === b.owner) continue;
           const dx = b.mesh.position.x - npc.mesh.position.x;
           const dz = b.mesh.position.z - npc.mesh.position.z;
-          const dist = Math.sqrt(dx * dx + dz * dz);
-          if (dist < 1.0) {
+          if (dx * dx + dz * dz < 1.0) {
             npc.hp -= 1; // each bullet always chips off 1 — guns kill faster by firing more
             hit = true;
             if (npc.hp <= 0) {
@@ -9341,19 +9339,20 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private updateNPCs(dt: number): void {
-    // Performance: skip AI + animation for NPCs far from the player (you can't see them act anyway).
-    // Saves the O(N²) target search and per-bone animation when there are ~50 NPCs spread around.
     const cullSqr = 220 * 220;
-    for (const npc of this.npcs) {
+    // Precompute the set of NPC indices currently riding a car (avoids O(cars) per NPC).
+    const driverIdx = new Set<number>();
+    for (const c of this.cars) {
+      if (typeof c.driver === 'number') driverIdx.add(c.driver);
+    }
+    for (let npcIdx = 0; npcIdx < this.npcs.length; npcIdx++) {
+      const npc = this.npcs[npcIdx];
       if (npc.dead) continue;
       const dxToP = npc.mesh.position.x - this.playerPos.x;
       const dzToP = npc.mesh.position.z - this.playerPos.z;
-      if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue; // skip distant NPCs entirely
+      if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue;
 
-      const npcIdx = this.npcs.indexOf(npc);
-      // If this NPC is currently driving a car/T-Rex, the car loop already moves them
-      // and sets their riding pose — skip walking AI/animation here so it isn't overridden.
-      if (this.cars.some(c => c.driver === npcIdx)) continue;
+      if (driverIdx.has(npcIdx)) continue;
       const aggroRange = 30;
       const shootRange = 18;
 
@@ -9362,20 +9361,22 @@ export class BattleScene extends Phaser.Scene {
       let targetDist = 99999;
       let targetIsPlayer = false;
 
-      // First check other NPCs
+      // First check other NPCs — compare squared distance, skip sqrt.
+      let targetDistSqr = targetDist * targetDist;
       for (let j = 0; j < this.npcs.length; j++) {
         if (j === npcIdx || this.npcs[j].dead) continue;
         const other = this.npcs[j];
         const odx = other.mesh.position.x - npc.mesh.position.x;
         const odz = other.mesh.position.z - npc.mesh.position.z;
-        const odist = Math.sqrt(odx * odx + odz * odz);
-        if (odist < targetDist) {
-          targetDist = odist;
+        const odistSqr = odx * odx + odz * odz;
+        if (odistSqr < targetDistSqr) {
+          targetDistSqr = odistSqr;
           targetX = other.mesh.position.x;
           targetY = other.mesh.position.y + 1;
           targetZ = other.mesh.position.z;
         }
       }
+      targetDist = Math.sqrt(targetDistSqr);
 
       // Player targeting — mounted players are a big, visible target, so NPCs go after them
       // at the same priority as other NPCs. On foot, the existing preference (NPCs first) stays.
