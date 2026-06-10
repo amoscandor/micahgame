@@ -10,6 +10,15 @@ import { getControls, DEFAULT_GAMEPAD, DEFAULT_KEYBOARD, type ControlScheme } fr
 import { ARMOR_ITEMS, getEquippedArmor } from './ArmorShopScene';
 import { getEquippedPets } from './PetShopScene';
 
+// Shared geometries/materials so we don't allocate per-bullet/per-particle (huge GC win).
+const PLAYER_BULLET_GEO = new THREE.SphereGeometry(0.15, 6, 6);
+const PLAYER_BULLET_MAT = new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffaa00, emissiveIntensity: 2.0, roughness: 0.0 });
+const NPC_BULLET_GEO = new THREE.SphereGeometry(0.08, 4, 4);
+const NPC_BULLET_MAT_PLAYER = new THREE.MeshStandardMaterial({ color: 0xff4400, emissive: 0xff2200, emissiveIntensity: 1.5 });
+const NPC_BULLET_MAT_NPC = new THREE.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 1.5 });
+const FLUFF_GEO = new THREE.SphereGeometry(0.15, 5, 5);
+const FLUFF_MAT = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 1 });
+
 // 3D character colors — matches character select
 const CHAR_COLORS = [
   0x44aaff, 0xff4400, 0x4444aa, 0xff4400, 0x44aaff,
@@ -8917,16 +8926,9 @@ export class BattleScene extends Phaser.Scene {
     const by = terrainY + 1.5 + dy * spawnDist;
     const bz = this.playerPos.z + dz * spawnDist;
 
-    const geo = new THREE.SphereGeometry(0.15, 6, 6);
-    const mat = new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffaa00, emissiveIntensity: 2.0, roughness: 0.0 });
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = new THREE.Mesh(PLAYER_BULLET_GEO, PLAYER_BULLET_MAT);
     mesh.position.set(bx, by, bz);
     this.scene3d.add(mesh);
-
-    const flash = new THREE.PointLight(0xffaa44, 3, 8);
-    flash.position.set(bx, by, bz);
-    this.scene3d.add(flash);
-    setTimeout(() => this.scene3d.remove(flash), 80);
 
     this.bullets.push({
       mesh,
@@ -9496,13 +9498,7 @@ export class BattleScene extends Phaser.Scene {
               // Apply aim jitter perpendicular to aim
               const jitterX = (npc.aimErrX ?? 0);
               const jitterY = (npc.aimErrY ?? 0);
-              const bulletGeo = new THREE.SphereGeometry(0.08, 4, 4);
-              const bulletMat = new THREE.MeshStandardMaterial({
-                color: targetIsPlayer ? 0xff4400 : 0xff8800,
-                emissive: targetIsPlayer ? 0xff2200 : 0xff6600,
-                emissiveIntensity: 1.5,
-              });
-              const bullet = new THREE.Mesh(bulletGeo, bulletMat);
+              const bullet = new THREE.Mesh(NPC_BULLET_GEO, targetIsPlayer ? NPC_BULLET_MAT_PLAYER : NPC_BULLET_MAT_NPC);
               bullet.position.set(bx, by, bz);
               this.scene3d.add(bullet);
               this.bullets.push({
@@ -9982,12 +9978,10 @@ export class BattleScene extends Phaser.Scene {
 
   /** Spawn black fluff particles at position that travel to map center (0,0,0) and vanish */
   private spawnDeathFluff(pos: THREE.Vector3, count = 20): void {
-    const fluffMat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 1 });
-    const fluffGeo = new THREE.SphereGeometry(0.15, 5, 5);
     const particles: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; life: number }[] = [];
 
     for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(fluffGeo, fluffMat.clone());
+      const m = new THREE.Mesh(FLUFF_GEO, FLUFF_MAT.clone());
       // Scatter around death position
       m.position.set(
         pos.x + (Math.random() - 0.5) * 1.5,
