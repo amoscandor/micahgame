@@ -8706,12 +8706,15 @@ export class BattleScene extends Phaser.Scene {
   private static STACK_MAX = 10;
 
   private slotIcon(name: string): string {
-    if (name === 'pizza') return '<span style="font-size:24px">🍕</span>';
-    if (name === 'cookie') return '<span style="font-size:24px">🍪</span>';
-    // Gun: simple horizontal silhouette in the rarity color
+    const mob = 'ontouchstart' in window;
+    const emojiSize = mob ? 18 : 24;
+    const svgW = mob ? 28 : 40;
+    const svgH = mob ? 12 : 18;
+    if (name === 'pizza') return `<span style="font-size:${emojiSize}px">🍕</span>`;
+    if (name === 'cookie') return `<span style="font-size:${emojiSize}px">🍪</span>`;
     const wep = Object.values(WEAPONS).find(w => w.name === name);
     const color = wep ? '#' + wep.color.toString(16).padStart(6, '0') : '#888';
-    return `<svg width="40" height="18" viewBox="0 0 40 18">
+    return `<svg width="${svgW}" height="${svgH}" viewBox="0 0 40 18">
       <rect x="2" y="6" width="16" height="8" rx="1" fill="${color}"/>
       <rect x="18" y="8" width="20" height="4" fill="${color}"/>
       <rect x="5" y="13" width="5" height="5" fill="${color}"/>
@@ -8731,10 +8734,11 @@ export class BattleScene extends Phaser.Scene {
         el.innerHTML = '';
         continue;
       }
+      const mob = 'ontouchstart' in window;
       const isStack = BattleScene.STACKABLE.has(slot.name);
       const badge = isStack ? `x${slot.count}` : `${slot.ammo}`;
       el.innerHTML = `${this.slotIcon(slot.name)}
-        <div style="font-size:11px;color:#ffeebb;font-weight:bold;margin-top:2px">${badge}</div>`;
+        <div style="font-size:${mob?9:11}px;color:#ffeebb;font-weight:bold;margin-top:1px">${badge}</div>`;
     }
   }
 
@@ -9512,7 +9516,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private updateNPCs(dt: number): void {
-    const cullSqr = 220 * 220;
+    const cullSqr = Infinity; // bots chase the player from anywhere on the map
     // Precompute the set of NPC indices currently riding a car (avoids O(cars) per NPC).
     const driverIdx = new Set<number>();
     for (const c of this.cars) {
@@ -9526,8 +9530,8 @@ export class BattleScene extends Phaser.Scene {
       if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue;
 
       if (driverIdx.has(npcIdx)) continue;
-      const aggroRange = 120;
-      const shootRange = 60;
+      const aggroRange = 9999; // whole map
+      const shootRange = 80;
 
       let targetX = 0, targetY = 0, targetZ = 0;
       let targetDist = 99999;
@@ -10396,8 +10400,8 @@ export class BattleScene extends Phaser.Scene {
       <div id="hud-pickup" style="position:absolute;top:35%;left:50%;transform:translate(-50%,0);color:#ffffff;font:bold ${mob?20:22}px Arial;text-shadow:2px 2px 6px black;opacity:0;transition:opacity 0.3s;-webkit-user-select:none">
       </div>
       <button id="hud-pause" style="position:absolute;top:${mob?'env(safe-area-inset-top, 10px)':'15px'};right:15px;padding:${mob?'8px 16px':'10px 22px'};background:rgba(40,90,200,0.8);color:white;border:2px solid white;border-radius:8px;font:bold ${mob?14:18}px Arial;cursor:pointer;z-index:100;-webkit-user-select:none;pointer-events:auto">PAUSE</button>
-      <div id="hud-hotbar" style="position:absolute;bottom:${mob?'calc(env(safe-area-inset-bottom, 10px) + 120px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:auto;-webkit-user-select:none">
-        ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?56:64}px;height:${mob?56:64}px;border:2px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"></div>`).join('')}
+      <div id="hud-hotbar" style="position:absolute;bottom:${mob?'env(safe-area-inset-bottom, 4px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:${mob?3:6}px;pointer-events:auto;-webkit-user-select:none">
+        ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?36:64}px;height:${mob?36:64}px;border:${mob?1:2}px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:${mob?5:8}px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"></div>`).join('')}
       </div>
     `;
     document.body.appendChild(hud);
