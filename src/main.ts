@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { gameConfig } from './config/game.config';
+import { startMenuMusic } from './utils/menuMusic';
 import { BootScene } from './scenes/BootScene';
 import { TitleScene } from './scenes/TitleScene';
 import { CharacterSelectScene } from './scenes/CharacterSelectScene';
@@ -22,6 +23,9 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 new Phaser.Game(config);
+
+// Background music for every non-battle scene. Battle/Boss scenes stop it.
+startMenuMusic();
 
 // In dev, kill any old service workers + caches so iPhone Safari always gets fresh code.
 if (import.meta.env.DEV && 'serviceWorker' in navigator) {

@@ -5,6 +5,7 @@ import { BossAI, BossAction } from '../game/BossAI';
 // ActionMenu no longer needed — using simple A button
 import { VirtualJoystick } from '../ui/VirtualJoystick';
 import { addCoins } from '../utils/coinStore';
+import { stopMenuMusic } from '../utils/menuMusic';
 
 export class BossScene extends Phaser.Scene {
   private bossState!: BossState;
@@ -36,6 +37,7 @@ export class BossScene extends Phaser.Scene {
   }
 
   create(data?: { characterKey?: string; characterName?: string; power?: string; powerColor?: number }): void {
+    stopMenuMusic();
     if (data?.characterKey) this.characterKey = data.characterKey;
     if (data?.characterName) this.characterName = data.characterName;
     if (data?.power) this.power = data.power;

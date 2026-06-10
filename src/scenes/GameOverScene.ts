@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config/game.config';
 import { getCoins } from '../utils/coinStore';
+import { startMenuMusic } from '../utils/menuMusic';
 
 export class GameOverScene extends Phaser.Scene {
   constructor() {
@@ -8,6 +9,7 @@ export class GameOverScene extends Phaser.Scene {
   }
 
   create(data: { won: boolean; coinsEarned?: number; totalCoins?: number }): void {
+    startMenuMusic();
     this.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'forest-bg')
       .setDisplaySize(GAME_WIDTH, GAME_HEIGHT);
     this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.6);

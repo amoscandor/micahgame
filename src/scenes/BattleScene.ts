@@ -9,6 +9,7 @@ import { addCoins, getCoins } from '../utils/coinStore';
 import { getControls, DEFAULT_GAMEPAD, DEFAULT_KEYBOARD, type ControlScheme } from '../utils/controlBindings';
 import { ARMOR_ITEMS, getEquippedArmor } from './ArmorShopScene';
 import { getEquippedPets } from './PetShopScene';
+import { stopMenuMusic } from '../utils/menuMusic';
 
 // Shared geometries/materials so we don't allocate per-bullet/per-particle (huge GC win).
 const PLAYER_BULLET_GEO = new THREE.SphereGeometry(0.15, 6, 6);
@@ -287,6 +288,8 @@ export class BattleScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Battle scene has its own music — silence the menu loop.
+    stopMenuMusic();
     // Bake sound effects
     this.bakeSounds();
     this.startBattleMusic();
