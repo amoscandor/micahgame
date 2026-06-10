@@ -10400,7 +10400,7 @@ export class BattleScene extends Phaser.Scene {
       <div id="hud-pickup" style="position:absolute;top:35%;left:50%;transform:translate(-50%,0);color:#ffffff;font:bold ${mob?20:22}px Arial;text-shadow:2px 2px 6px black;opacity:0;transition:opacity 0.3s;-webkit-user-select:none">
       </div>
       <button id="hud-pause" style="position:absolute;top:${mob?'env(safe-area-inset-top, 10px)':'15px'};right:15px;padding:${mob?'8px 16px':'10px 22px'};background:rgba(40,90,200,0.8);color:white;border:2px solid white;border-radius:8px;font:bold ${mob?14:18}px Arial;cursor:pointer;z-index:100;-webkit-user-select:none;pointer-events:auto">PAUSE</button>
-      <div id="hud-hotbar" style="position:absolute;bottom:${mob?'env(safe-area-inset-bottom, 4px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:${mob?3:6}px;pointer-events:auto;-webkit-user-select:none">
+      <div id="hud-hotbar" style="position:absolute;bottom:${mob?'env(safe-area-inset-bottom, 4px)':'20px'};left:50%;transform:translateX(-50%);display:flex;gap:${mob?3:6}px;pointer-events:auto;-webkit-user-select:none;z-index:2000">
         ${[0,1,2,3,4].map(i => `<div id="hotbar-slot-${i}" data-slot="${i}" style="width:${mob?36:64}px;height:${mob?36:64}px;border:${mob?1:2}px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.5);border-radius:${mob?5:8}px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer"></div>`).join('')}
       </div>
     `;
@@ -10415,7 +10415,11 @@ export class BattleScene extends Phaser.Scene {
     this.hotbarDiv = document.getElementById('hud-hotbar') as HTMLDivElement;
     for (let i = 0; i < 5; i++) {
       const el = document.getElementById(`hotbar-slot-${i}`);
-      if (el) el.addEventListener('click', (e) => { e.stopPropagation(); this.selectSlot(i); });
+      if (el) {
+        el.addEventListener('click', (e) => { e.stopPropagation(); this.selectSlot(i); });
+        // Phone tap — handle touchstart explicitly so the joystick/shoot don't steal it.
+        el.addEventListener('touchstart', (e) => { e.stopPropagation(); e.preventDefault(); this.selectSlot(i); }, { passive: false });
+      }
     }
     this.updateHotbarUI();
     const pauseBtn = document.getElementById('hud-pause')!;
