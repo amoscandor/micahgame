@@ -9526,50 +9526,40 @@ export class BattleScene extends Phaser.Scene {
       if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue;
 
       if (driverIdx.has(npcIdx)) continue;
-      const aggroRange = 30;
-      const shootRange = 18;
+      const aggroRange = 120;
+      const shootRange = 60;
 
-      // Find nearest target — prefer other NPCs over player
       let targetX = 0, targetY = 0, targetZ = 0;
       let targetDist = 99999;
       let targetIsPlayer = false;
 
-      // First check other NPCs — compare squared distance, skip sqrt.
-      let targetDistSqr = targetDist * targetDist;
-      for (let j = 0; j < this.npcs.length; j++) {
-        if (j === npcIdx || this.npcs[j].dead) continue;
-        const other = this.npcs[j];
-        const odx = other.mesh.position.x - npc.mesh.position.x;
-        const odz = other.mesh.position.z - npc.mesh.position.z;
-        const odistSqr = odx * odx + odz * odz;
-        if (odistSqr < targetDistSqr) {
-          targetDistSqr = odistSqr;
-          targetX = other.mesh.position.x;
-          targetY = other.mesh.position.y + 1;
-          targetZ = other.mesh.position.z;
-        }
-      }
-      targetDist = Math.sqrt(targetDistSqr);
-
-      // Player targeting — mounted players are a big, visible target, so NPCs go after them
-      // at the same priority as other NPCs. On foot, the existing preference (NPCs first) stays.
+      // Player is the priority target — every bot within aggro chases YOU.
       const dxP = this.playerPos.x - npc.mesh.position.x;
       const dzP = this.playerPos.z - npc.mesh.position.z;
       const distP = Math.sqrt(dxP * dxP + dzP * dzP);
-      const playerMounted = this.playerInCar >= 0;
-      if (playerMounted && distP < targetDist) {
+      if (distP < aggroRange) {
         targetDist = distP;
         targetX = this.playerPos.x;
         targetY = this.playerPos.y + 1;
         targetZ = this.playerPos.z;
         targetIsPlayer = true;
-      } else if (!playerMounted && targetDist > 50 && distP < 20) {
-        // No NPCs in range but player is close
-        targetDist = distP;
-        targetX = this.playerPos.x;
-        targetY = this.playerPos.y + 1;
-        targetZ = this.playerPos.z;
-        targetIsPlayer = true;
+      } else {
+        // Player out of range — fall back to nearest other NPC so they still fight.
+        let targetDistSqr = targetDist * targetDist;
+        for (let j = 0; j < this.npcs.length; j++) {
+          if (j === npcIdx || this.npcs[j].dead) continue;
+          const other = this.npcs[j];
+          const odx = other.mesh.position.x - npc.mesh.position.x;
+          const odz = other.mesh.position.z - npc.mesh.position.z;
+          const odistSqr = odx * odx + odz * odz;
+          if (odistSqr < targetDistSqr) {
+            targetDistSqr = odistSqr;
+            targetX = other.mesh.position.x;
+            targetY = other.mesh.position.y + 1;
+            targetZ = other.mesh.position.z;
+          }
+        }
+        targetDist = Math.sqrt(targetDistSqr);
       }
 
       if (targetDist < aggroRange) {
