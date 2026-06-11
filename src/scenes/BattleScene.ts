@@ -7592,22 +7592,19 @@ export class BattleScene extends Phaser.Scene {
 
   private updateCars(dt: number): void {
     // NPCs look for nearby empty cars to drive
-    for (const npc of this.npcs) {
-      if (npc.dead) continue;
-      // Check if this NPC is already driving
-      const alreadyDriving = this.cars.some(c => c.driver === this.npcs.indexOf(npc));
-      if (alreadyDriving) continue;
-
-      // Find nearest empty car
+    const drivers = new Set<number>();
+    for (const c of this.cars) if (typeof c.driver === 'number') drivers.add(c.driver);
+    for (let ni = 0; ni < this.npcs.length; ni++) {
+      const npc = this.npcs[ni];
+      if (npc.dead || drivers.has(ni)) continue;
       for (let ci = 0; ci < this.cars.length; ci++) {
         const car = this.cars[ci];
         if (car.driver !== 'none') continue;
         const dx = npc.mesh.position.x - car.mesh.position.x;
         const dz = npc.mesh.position.z - car.mesh.position.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 4) {
-          car.driver = this.npcs.indexOf(npc);
-          // Keep the NPC visible — we'll place them on the seat so the player can see who's riding.
+        if (dx * dx + dz * dz < 16) {
+          car.driver = ni;
+          drivers.add(ni);
           break;
         }
       }
@@ -7760,9 +7757,14 @@ export class BattleScene extends Phaser.Scene {
       // Running animation — works for all dino types
       const spd = Math.sqrt(car.vx * car.vx + car.vz * car.vz);
 
+      // Skip expensive skeletal animation + leg pivots if this car is far from the player.
+      const _dxC = car.mesh.position.x - this.playerPos.x;
+      const _dzC = car.mesh.position.z - this.playerPos.z;
+      const farFromPlayer = (_dxC * _dxC + _dzC * _dzC) > (180 * 180);
+
       // Advance any rigged GLB animation (T-Rex legs, etc.). Time scale tracks ground speed
       // so legs move faster when running, slower when standing still.
-      if (car.mixer) {
+      if (car.mixer && !farFromPlayer) {
         const animSpeed = Math.max(0.4, Math.min(2, spd / 12));
         car.mixer.update(dt * animSpeed);
       }
@@ -7795,7 +7797,7 @@ export class BattleScene extends Phaser.Scene {
         }
       }
 
-      if (spd > 1 && car.legPivots) {
+      if (spd > 1 && car.legPivots && !farFromPlayer) {
         car.runPhase = (car.runPhase || 0) + dt * 7;
         const rc = car.runPhase;
 
