@@ -9519,7 +9519,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private updateNPCs(dt: number): void {
-    const cullSqr = Infinity; // bots chase the player from anywhere on the map
+    const cullSqr = 300 * 300;
     // Precompute the set of NPC indices currently riding a car (avoids O(cars) per NPC).
     const driverIdx = new Set<number>();
     for (const c of this.cars) {
@@ -9533,8 +9533,10 @@ export class BattleScene extends Phaser.Scene {
       if (dxToP * dxToP + dzToP * dzToP > cullSqr) continue;
 
       if (driverIdx.has(npcIdx)) continue;
-      const aggroRange = 9999; // whole map
-      const shootRange = 80;
+      // Roughly half the bots (even indices) hunt you; the rest fight each other.
+      const isHunter = (npcIdx % 2) === 0;
+      const aggroRange = isHunter ? 80 : 0;
+      const shootRange = 50;
 
       let targetX = 0, targetY = 0, targetZ = 0;
       let targetDist = 99999;
