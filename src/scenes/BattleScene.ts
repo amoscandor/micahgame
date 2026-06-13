@@ -4535,6 +4535,8 @@ export class BattleScene extends Phaser.Scene {
           playerShirtBrand = custom.shirtBrand || null;
         }
       } catch (_e) { /* ignore */ }
+    } else if (this.selectedCharKey === 'char-steve') {
+      vis = { shirt: 0x00aaaa, skin: 0xba8860, pants: 0x4422aa, hair: 0x4a3020, eye: 0x4a7aaa };
     } else {
       const charIndex = parseInt(this.selectedCharKey.replace('char-', ''), 10);
       if (charIndex >= 0 && charIndex < CHAR_VISUALS.length) {

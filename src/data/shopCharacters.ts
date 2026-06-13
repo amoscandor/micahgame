@@ -219,6 +219,4 @@ export const SHOP_CHARACTERS: ShopCharacter[] = [
     skinColor: 0x222222, hairColor: 0x222222, shirtColor: 0x222222, pantsColor: 0x222222, hatColor: -1, gender: 'boy' },
   { id: 'shop-creeper', name: 'Creeper', searchNames: ['minecraft creeper', 'ssss'], price: 5000,
     skinColor: 0x44aa44, hairColor: 0x44aa44, shirtColor: 0x44aa44, pantsColor: 0x44aa44, hatColor: -1, gender: 'boy' },
-  { id: 'shop-steve', name: 'Steve', searchNames: ['quaternius steve'], price: 3000,
-    skinColor: 0xba8860, hairColor: 0x4a3020, shirtColor: 0x00aaaa, pantsColor: 0x4422aa, hatColor: -1, gender: 'boy' },
 ];

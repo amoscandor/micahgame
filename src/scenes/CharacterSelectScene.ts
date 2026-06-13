@@ -31,6 +31,7 @@ export const CHARACTERS: CharacterData[] = [
   { key: 'char-17', name: 'Scarlett', gender: 'girl' },
   { key: 'char-18', name: 'Aria', gender: 'girl' },
   { key: 'char-19', name: 'Roxy', gender: 'girl' },
+  { key: 'char-steve', name: 'Steve', gender: 'boy' },
 ];
 
 export class CharacterSelectScene extends Phaser.Scene {
