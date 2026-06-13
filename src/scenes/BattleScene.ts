@@ -133,6 +133,7 @@ export class BattleScene extends Phaser.Scene {
   private pLeftUpperArm!: THREE.Group; private pLeftForearm!: THREE.Group;
   private pRightUpperArm!: THREE.Group; private pRightForearm!: THREE.Group;
   private pThirdGun?: THREE.Group;
+  private steveMixer?: THREE.AnimationMixer;
   private pLeftThigh!: THREE.Group; private pLeftShin!: THREE.Group;
   private pRightThigh!: THREE.Group; private pRightShin!: THREE.Group;
 
@@ -2135,6 +2136,7 @@ export class BattleScene extends Phaser.Scene {
         return;
       }
       this.updatePlayer(dt);
+      if (this.steveMixer) this.steveMixer.update(dt);
       this.updateNPCs(dt);
       this.updateBullets(dt);
       this.updateCars(dt);
@@ -4716,6 +4718,28 @@ export class BattleScene extends Phaser.Scene {
     this.pLeftShin = leftShin;
     this.pRightThigh = rightThigh;
     this.pRightShin = rightShin;
+
+    // Steve character — replace the procedural body with the Quaternius FBX model (CC0).
+    if (this.selectedCharKey === 'char-steve') {
+      hips.visible = false;
+      const baseUrl = (import.meta.env?.BASE_URL ?? '/');
+      new FBXLoader().load(baseUrl + 'models/Steve.fbx', (fbx) => {
+        const bb = new THREE.Box3().setFromObject(fbx);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const longest = Math.max(size.x, size.y, size.z) || 1;
+        const fitScale = 1.9 / longest;
+        fbx.scale.setScalar(fitScale);
+        fbx.position.y = -bb.min.y * fitScale;
+        root.add(fbx);
+        // Play any built-in animation (idle/walk) if the FBX has one.
+        if (fbx.animations && fbx.animations.length > 0) {
+          const mixer = new THREE.AnimationMixer(fbx);
+          mixer.clipAction(fbx.animations[0]).play();
+          this.steveMixer = mixer;
+        }
+      });
+    }
 
     // Attach a 3rd-person AR rifle to the torso (chest level) — visible only when the player
     // has an AR equipped. Same position as the title-scene bots so it matches.
