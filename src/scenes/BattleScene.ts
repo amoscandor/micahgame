@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { WEAPONS } from '../config/game.config';
 import { NetworkManager } from '../network/NetworkManager';
@@ -6000,6 +6001,9 @@ export class BattleScene extends Phaser.Scene {
     if (worldType === 2) { this.createDesertAnimals(); return; }
     if (worldType === 3) { this.createSnowAnimals(); return; }
     if (worldType === 1) { this.createForestAnimals(); return; }
+    // Randomstuff (world 0): Quaternius Animated Dinosaur Pack (CC0).
+    this.createQuaterniusDinos();
+    return;
     // T-Rex colors — each one slightly different
     const rexColors = [
       { body: 0x4a3a28, light: 0x6a5a3a },
@@ -6729,6 +6733,77 @@ export class BattleScene extends Phaser.Scene {
       group.rotation.y = Math.random() * Math.PI * 2;
       this.scene3d.add(group);
       this.cars.push({ mesh: group, vx: 0, vz: 0, speed: 15 + Math.random() * 10, driver: 'none', legPivots, tailPivots, jawPivot, neckBase, neckMid, bodyGroup, runPhase: Math.random() * Math.PI * 2 });
+    }
+  }
+
+  private createQuaterniusDinos(): void {
+    const baseUrl = (import.meta.env?.BASE_URL ?? '/');
+    const dinos = [
+      { file: 'Trex.fbx', hp: 12, speed: 26, count: 3 },
+      { file: 'Triceratops.fbx', hp: 14, speed: 20, count: 2 },
+      { file: 'Stegosaurus.fbx', hp: 14, speed: 18, count: 2 },
+      { file: 'Velociraptor.fbx', hp: 6, speed: 34, count: 3 },
+      { file: 'Apatosaurus.fbx', hp: 22, speed: 14, count: 1 },
+      { file: 'Parasaurolophus.fbx', hp: 10, speed: 24, count: 2 },
+    ];
+    const fbxLoader = new FBXLoader();
+    for (const def of dinos) {
+      fbxLoader.load(baseUrl + 'models/dinos/' + def.file, (fbx) => {
+        const walkClip = fbx.animations[0];
+
+        // Auto-fit each species to roughly 8 units tall (Quaternius FBX uses cm scale).
+        const bb = new THREE.Box3().setFromObject(fbx);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const longest = Math.max(size.x, size.y, size.z) || 1;
+        const fitScale = 8 / longest;
+
+        for (let i = 0; i < def.count; i++) {
+          const clone = cloneSkinned(fbx) as THREE.Object3D;
+          clone.scale.setScalar(fitScale);
+
+          // Drop the model so its feet sit on the ground (offset = -bb.min.y * scale).
+          const cb = new THREE.Box3().setFromObject(clone);
+          clone.position.y = -cb.min.y;
+
+          const group = new THREE.Group();
+          group.add(clone);
+          const cx = (Math.random() - 0.5) * 800;
+          const cz = (Math.random() - 0.5) * 800;
+          group.position.set(cx, this.getTerrainHeight(cx, cz), cz);
+          group.rotation.y = Math.random() * Math.PI * 2;
+          this.scene3d.add(group);
+
+          // Per-instance mixer so each dino walks independently.
+          const mixer = new THREE.AnimationMixer(clone);
+          if (walkClip) {
+            const action = mixer.clipAction(walkClip);
+            action.play();
+            mixer.setTime(Math.random() * walkClip.duration);
+          }
+
+          // Floating health bar above the dino's head.
+          const hb = this.createHealthBarSprite();
+          hb.sprite.position.set(0, 6, 0);
+          hb.sprite.scale.set(3, 0.35, 1);
+          group.add(hb.sprite);
+
+          this.cars.push({
+            mesh: group,
+            vx: 0,
+            vz: 0,
+            speed: def.speed,
+            driver: 'none',
+            mixer,
+            hp: def.hp,
+            maxHp: def.hp,
+            healthBar: hb.sprite,
+            healthCtx: hb.ctx,
+            healthTex: hb.texture,
+            runPhase: Math.random() * Math.PI * 2,
+          });
+        }
+      });
     }
   }
 
