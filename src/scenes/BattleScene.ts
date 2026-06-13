@@ -134,6 +134,9 @@ export class BattleScene extends Phaser.Scene {
   private pRightUpperArm!: THREE.Group; private pRightForearm!: THREE.Group;
   private pThirdGun?: THREE.Group;
   private steveMixer?: THREE.AnimationMixer;
+  private steveIdleAction?: THREE.AnimationAction;
+  private steveRunAction?: THREE.AnimationAction;
+  private steveCurrentAction?: THREE.AnimationAction;
   private pLeftThigh!: THREE.Group; private pLeftShin!: THREE.Group;
   private pRightThigh!: THREE.Group; private pRightShin!: THREE.Group;
 
@@ -2136,7 +2139,17 @@ export class BattleScene extends Phaser.Scene {
         return;
       }
       this.updatePlayer(dt);
-      if (this.steveMixer) this.steveMixer.update(dt);
+      if (this.steveMixer) {
+        // Switch between idle and run when the player starts/stops moving.
+        const moving = this.playerSpeed > 0.3;
+        const desired = moving ? this.steveRunAction : this.steveIdleAction;
+        if (desired && desired !== this.steveCurrentAction) {
+          this.steveCurrentAction?.fadeOut(0.15);
+          desired.reset().fadeIn(0.15).play();
+          this.steveCurrentAction = desired;
+        }
+        this.steveMixer.update(dt);
+      }
       this.updateNPCs(dt);
       this.updateBullets(dt);
       this.updateCars(dt);
@@ -4732,10 +4745,18 @@ export class BattleScene extends Phaser.Scene {
         fbx.scale.setScalar(fitScale);
         fbx.position.y = -bb.min.y * fitScale;
         root.add(fbx);
-        // Play any built-in animation (idle/walk) if the FBX has one.
+        // Pick idle + run/walk clips by name so we can switch when the player moves.
         if (fbx.animations && fbx.animations.length > 0) {
           const mixer = new THREE.AnimationMixer(fbx);
-          mixer.clipAction(fbx.animations[0]).play();
+          const clips = fbx.animations;
+          const idleClip = clips.find(c => /idle/i.test(c.name)) ?? clips[0];
+          const runClip = clips.find(c => /run/i.test(c.name))
+            ?? clips.find(c => /walk/i.test(c.name))
+            ?? clips[1] ?? clips[0];
+          this.steveIdleAction = mixer.clipAction(idleClip);
+          this.steveRunAction = mixer.clipAction(runClip);
+          this.steveIdleAction.play();
+          this.steveCurrentAction = this.steveIdleAction;
           this.steveMixer = mixer;
         }
       });
