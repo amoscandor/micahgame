@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { WEAPONS } from '../config/game.config';
 import { NetworkManager } from '../network/NetworkManager';
@@ -5467,7 +5469,44 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private createCheese(): void {
-    // Realistic pizza materials
+    // Use Poly-Pizza Pepperoni Pizza OBJ model (with texture from the MTL).
+    const baseUrl = (import.meta.env?.BASE_URL ?? '/');
+    const mtlLoader = new MTLLoader();
+    mtlLoader.setResourcePath(baseUrl + 'models/pizza/');
+    mtlLoader.load(baseUrl + 'models/pizza/pizza.mtl', (mats) => {
+      mats.preload();
+      const objLoader = new OBJLoader();
+      objLoader.setMaterials(mats);
+      objLoader.load(baseUrl + 'models/pizza/pizza.obj', (sourceObj) => {
+        // Auto-fit so each pizza is about 0.7 units across (similar to the old procedural one).
+        const bb = new THREE.Box3().setFromObject(sourceObj);
+        const size = new THREE.Vector3();
+        bb.getSize(size);
+        const longest = Math.max(size.x, size.y, size.z) || 1;
+        const fitScale = 0.7 / longest;
+        for (let i = 0; i < 200; i++) {
+          const group = new THREE.Group();
+          const clone = sourceObj.clone(true);
+          clone.scale.setScalar(fitScale);
+          // Drop onto ground (offset by min.y after scaling)
+          clone.position.y = -bb.min.y * fitScale;
+          group.add(clone);
+          const sc = 0.8 + Math.random() * 0.4;
+          group.scale.setScalar(sc);
+          const cx = (Math.random() - 0.5) * 900;
+          const cz = (Math.random() - 0.5) * 900;
+          if (this.isOnRoad(cx, cz)) continue;
+          group.position.set(cx, this.getTerrainHeight(cx, cz) + 0.1, cz);
+          group.rotation.y = Math.random() * Math.PI * 2;
+          group.rotation.x = (Math.random() - 0.5) * 0.15;
+          group.rotation.z = (Math.random() - 0.5) * 0.15;
+          this.scene3d.add(group);
+          this.cheesePickups.push({ group, picked: false, name: 'pizza' });
+        }
+      });
+    });
+    return;
+    // === legacy procedural pizza (kept for reference; never reached) ===
     const crustMat = new THREE.MeshStandardMaterial({ color: 0xc89030, roughness: 0.9, metalness: 0.0 });
     const crustDarkMat = new THREE.MeshStandardMaterial({ color: 0xa06820, roughness: 0.85 });
     const sauceMat = new THREE.MeshStandardMaterial({ color: 0x991500, roughness: 0.75 });
